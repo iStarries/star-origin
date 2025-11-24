@@ -5,7 +5,7 @@ import torch.nn.parallel
 from torch.nn.parallel import DistributedDataParallel as DDP
 from base import BaseTrainer
 from utils import MetricTracker, MetricTracker_scalars
-from models.loss import WBCELoss, PKDLoss, ContLoss
+from models.loss import BCELoss, WBCELoss, PKDLoss, ContLoss
 from data_loader import VOC
 
 class Trainer_base(BaseTrainer):
@@ -83,6 +83,7 @@ class Trainer_base(BaseTrainer):
             [len(self.task_info['new_class'])], device=self.device) * self.config['hyperparameter']['pos_weight']
         self.BCELoss = WBCELoss(
             pos_weight=pos_weight, n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
+        self.DistillBCELoss = BCELoss(reduction='none')
 
         self._print_train_info()
 
@@ -298,7 +299,7 @@ class Trainer_incremental(Trainer_base):
                 self.model_old = nn.DataParallel(model_old, device_ids=self.device_ids)
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont',
+            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_bce_distill',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -306,6 +307,7 @@ class Trainer_incremental(Trainer_base):
 
         self.BCELoss_fake = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
         self.BCELoss_extra_bg = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
+        self.DistillBCELoss = BCELoss(reduction='none')
         self.PKDLoss = PKDLoss()
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
 
@@ -454,13 +456,17 @@ class Trainer_incremental(Trainer_base):
                 loss_mbce = loss_mbce_ori + loss_mbce_fake * weight_fake + loss_mbce_extra_bg * weight_extra_bg
                 loss_mbce = loss_mbce / (1 + weight_extra_bg + weight_fake)
 
+                # Distillation on logits: old-class channels supervised by teacher
+                # probabilities for every pixel, while new-class channels follow
+                # the current ground-truth labels.
+                loss_mbce_distill = self.DistillBCELoss(logit, data['label'], logit_old).mean(dim=[0, 2, 3])
 
                 loss_pkd = self.PKDLoss(features, features_old, pseudo_label_region.to(torch.float32))
 
                 loss_cont = self.ContLoss(
                     features[-1], logit[:, -self.n_new_classes:], data['label'], self.prev_prototypes)
 
-                loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum() \
+                loss = self.config['hyperparameter']['mbce'] * (loss_mbce.sum() + loss_mbce_distill.sum()) \
                        + self.config['hyperparameter']['pkd'] * loss_pkd.sum() \
                        + self.config['hyperparameter']['cont'] * loss_cont
 
@@ -471,6 +477,8 @@ class Trainer_incremental(Trainer_base):
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
             self.train_metrics.update('loss', loss.item())
             self.train_metrics.update('loss_mbce', loss_mbce.sum().item() * self.config['hyperparameter']['mbce'])
+            self.train_metrics.update('loss_bce_distill',
+                                      loss_mbce_distill.sum().item() * self.config['hyperparameter']['mbce'])
             self.train_metrics.update('loss_pkd', loss_pkd.sum().item() * self.config['hyperparameter']['pkd'])
             self.train_metrics.update('loss_cont', loss_cont.item() * self.config['hyperparameter']['cont'])
 

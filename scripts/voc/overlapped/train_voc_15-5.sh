@@ -8,7 +8,7 @@ TASKSETTING='overlap'
 TASKNAME='15-5'
 INIT_LR=0.001
 LR=0.0001
-MEMORY_SIZE=50 # 50 for STAR-M
+MEMORY_SIZE=0 # 50 for STAR-M
 
 NAME='STAR'
 python train_voc.py -c configs/config_voc.json \
