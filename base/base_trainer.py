@@ -47,6 +47,7 @@ class BaseTrainer:
         if self.monitor == 'off':
             self.mnt_mode = 'off'
             self.mnt_best = 0
+            self.mnt_metric = None
         else:
             self.mnt_mode, self.mnt_metric = self.monitor.split()
             assert self.mnt_mode in ['min', 'max']
@@ -55,6 +56,9 @@ class BaseTrainer:
             self.early_stop = cfg_trainer.get('early_stop', inf)
 
         self.start_epoch = 1
+
+        self.metric_tag = None if self.mnt_metric is None else self.mnt_metric.replace('/', '-').replace(' ', '')
+        self.latest_val_metric = None
 
         self.checkpoint_dir = config.save_dir
 
@@ -91,10 +95,20 @@ class BaseTrainer:
             # evaluate model performance according to configured metric, save best checkpoint as model_best
             if self.rank == 0:
                 if val_flag and (self.mnt_mode != 'off'):
+                    current_metric = log.get(self.mnt_metric, None)
+                    if current_metric is not None:
+                        try:
+                            current_metric = float(current_metric)
+                        except (TypeError, ValueError):
+                            pass
+                        self.latest_val_metric = current_metric
+                    else:
+                        self.latest_val_metric = None
+
                     try:
                         # check whether model performance improved or not, according to specified metric(mnt_metric)
-                        improved = (self.mnt_mode == 'min' and log[self.mnt_metric] <= self.mnt_best) or \
-                                   (self.mnt_mode == 'max' and log[self.mnt_metric] >= self.mnt_best)
+                        improved = (self.mnt_mode == 'min' and current_metric is not None and current_metric <= self.mnt_best) or \
+                                   (self.mnt_mode == 'max' and current_metric is not None and current_metric >= self.mnt_best)
                     except KeyError:
                         self.logger.warning("Warning: Metric '{}' is not found. "
                                             "Model performance monitoring is disabled.".format(self.mnt_metric))
@@ -102,10 +116,10 @@ class BaseTrainer:
                         improved = False
 
                     if improved:
-                        self.mnt_best = log[self.mnt_metric]
+                        self.mnt_best = current_metric
                         not_improved_count = 0
-                        self._save_best_model(epoch)
-                        
+                        self._save_best_model(epoch, current_metric)
+
                     else:
                         not_improved_count += 1
 
@@ -115,7 +129,7 @@ class BaseTrainer:
                         break
 
                 if epoch % self.save_period == 0:
-                    self._save_checkpoint(epoch)
+                    self._save_checkpoint(epoch, self.latest_val_metric)
 
                     self.compute_prototypes(self.config)
                     self.compute_noise(self.config)
@@ -312,7 +326,20 @@ class BaseTrainer:
         list_ids = list(range(n_gpu_use))
         return device, list_ids
 
-    def _save_checkpoint(self, epoch):
+    def _metric_suffix(self, metric_value):
+        if metric_value is None or self.metric_tag is None:
+            return ''
+
+        metric_clean = self.metric_tag
+        if metric_value is None:
+            return ''
+        try:
+            metric_fmt = f"{float(metric_value):.4f}"
+        except (TypeError, ValueError):
+            metric_fmt = str(metric_value)
+        return f"-{metric_clean}-{metric_fmt}"
+
+    def _save_checkpoint(self, epoch, metric_value=None):
         """
         Saving checkpoints
 
@@ -340,11 +367,11 @@ class BaseTrainer:
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
             }
-        filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
+        filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}{self._metric_suffix(metric_value)}.pth")
         torch.save(state, filename)
         self.logger.info("Saving checkpoint: {} ...".format(filename))
 
-    def _save_best_model(self, epoch):
+    def _save_best_model(self, epoch, metric_value=None):
         """
         Saving checkpoints
 
@@ -374,9 +401,9 @@ class BaseTrainer:
                 'monitor_best': self.mnt_best,
                 # 'config': self.config
             }
-        best_path = str(self.checkpoint_dir / 'model_best.pth')
+        best_path = str(self.checkpoint_dir / f"model_best{self._metric_suffix(metric_value)}.pth")
         torch.save(state, best_path)
-        self.logger.info("Saving current best: model_best.pth ...")
+        self.logger.info(f"Saving current best: {best_path} ...")
 
     def _resume_checkpoint(self, resume_path, test=False):
         """

@@ -75,6 +75,9 @@
     "hyperparameter": {
         "pos_weight": 4,
         "mbce": 1,
+        "mbce_distill": 0,
+        "enable_mbce_distill": false,
+        "distill_bg_only": false,
         "pkd": 5,
         "cont": 0.05
     },
@@ -95,9 +98,9 @@
         "epochs": 60,
         "save_dir": "saved_voc/",
         "save_period": -1,
-        "validation_period": 10,
+        "validation_period": 2,
         "verbosity": 2,
-        "monitor": "off",
+        "monitor": "max val_Mean_Intersection_over_Union_overall",
         "early_stop": -1,
         "reset_best_mnt": false,
         "tensorboard": false

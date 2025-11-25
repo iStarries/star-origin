@@ -33,8 +33,8 @@ class ConfigParser:
             + self.config['name']
 
         if self.run_id is None:  # use timestamp as default run-id
-            # run_id = datetime.now().strftime(r'%m%d_%H%M%S')
-            self.run_id = f"step_{self.config['data_loader']['args']['task']['step']}"
+            time_tag = datetime.now().strftime(r'%Y%m%d-%H%M%S')
+            self.run_id = f"step_{self.config['data_loader']['args']['task']['step']}_{time_tag}"
 
         self._save_dir = save_dir / 'models' / exper_name / self.run_id
         self._log_dir = save_dir / 'log' / exper_name / self.run_id

@@ -224,6 +224,8 @@ if __name__ == '__main__':
         CustomArgs(['--mbce'], type=float, target='hyperparameter;mbce'),
         CustomArgs(['--kd'], type=float, target='hyperparameter;kd'),
         CustomArgs(['--ac'], type=float, target='hyperparameter;ac'),
+        CustomArgs(['--enable_mbce_distill'], action='store_true', target='hyperparameter;enable_mbce_distill'),
+        CustomArgs(['--distill_bg_only'], action='store_true', target='hyperparameter;distill_bg_only'),
 
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
