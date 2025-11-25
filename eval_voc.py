@@ -42,14 +42,16 @@ def main(config):
 def main_worker(gpu, ngpus_per_node, config):
     if config['multiprocessing_distributed']:
         config.config['rank'] = config['rank'] * ngpus_per_node + gpu
+        dist.init_process_group(
+            backend=config['dist_backend'], init_method=config['dist_url'],
+            world_size=config['world_size'], rank=config['rank']
+        )
+        rank = dist.get_rank()
+    else:
+        rank = 0
+        config.config['rank'] = 0
 
-    dist.init_process_group(
-        backend=config['dist_backend'], init_method=config['dist_url'],
-        world_size=config['world_size'], rank=config['rank']
-    )
-    
     # Set looging
-    rank = dist.get_rank()
     logger = Logger(config.log_dir, rank=rank)
     logger.set_logger(f'train(rank{rank})', verbosity=2)
 
@@ -105,7 +107,8 @@ def main_worker(gpu, ngpus_per_node, config):
         logger=logger, gpu=gpu,
     )
 
-    torch.distributed.barrier()
+    if dist.is_available() and dist.is_initialized():
+        torch.distributed.barrier()
     trainer.test()
 
 

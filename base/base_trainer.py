@@ -1,6 +1,7 @@
 import os.path
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -24,7 +25,10 @@ class BaseTrainer:
         self.validation_period = cfg_trainer['validation_period'] if cfg_trainer['validation_period'] == -1 else cfg_trainer['validation_period']
         self.monitor = cfg_trainer.get('monitor', 'off')
         self.reset_best_mnt = cfg_trainer['reset_best_mnt']
-        self.rank = torch.distributed.get_rank()
+        if dist.is_available() and dist.is_initialized():
+            self.rank = dist.get_rank()
+        else:
+            self.rank = 0
 
         if logger is None:
             self.logger = config.get_logger('trainer', cfg_trainer['verbosity'])

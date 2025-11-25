@@ -1,6 +1,8 @@
 import argparse
 import random
 import collections
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,6 +19,22 @@ from trainer.trainer_ade import Trainer_base, Trainer_incremental
 from utils.parse_config import ConfigParser
 from logger.logger import Logger
 from utils.memory import memory_sampling_balanced
+
+
+def _resolve_prev_checkpoint(save_dir: Path, prev_step: int, epochs: int) -> Path:
+    """Find the previous step checkpoint, handling timestamped run folders and metric suffixes."""
+
+    base_dir = save_dir.parent
+    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/checkpoint-epoch{epochs}*.pth"))
+
+    if not candidates:
+        candidates = sorted((base_dir / f"step_{prev_step}").glob(f"checkpoint-epoch{epochs}*.pth"))
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No checkpoint found for step {prev_step} under {base_dir} with epoch {epochs}")
+
+    return candidates[-1]
 
 torch.backends.cudnn.benchmark = True
 
@@ -36,13 +54,16 @@ def main_worker(gpu, ngpus_per_node, config):
     if config['multiprocessing_distributed']:
         config.config['rank'] = config['rank'] * ngpus_per_node + gpu
 
-    dist.init_process_group(
-        backend=config['dist_backend'], init_method=config['dist_url'],
-        world_size=config['world_size'], rank=config['rank']
-    )
-    
+        dist.init_process_group(
+            backend=config['dist_backend'], init_method=config['dist_url'],
+            world_size=config['world_size'], rank=config['rank']
+        )
+        rank = dist.get_rank()
+    else:
+        rank = 0
+        config.config['rank'] = 0
+
     # Set looging
-    rank = dist.get_rank()
     logger = Logger(config.log_dir, rank=rank)
     logger.set_logger(f'train(rank{rank})', verbosity=2)
 
@@ -107,7 +128,7 @@ def main_worker(gpu, ngpus_per_node, config):
 
     # Load previous step weights
     if task_step > 0:
-        old_path = config.save_dir.parent / f"step_{task_step - 1}" / f"checkpoint-epoch{config['trainer']['epochs']}.pth"
+        old_path = _resolve_prev_checkpoint(config.save_dir, task_step - 1, config['trainer']['epochs'])
         model._load_pretrained_model(f'{old_path}')
         logger.info(f"Load weights from a previous step:{old_path}")
 
@@ -189,7 +210,8 @@ def main_worker(gpu, ngpus_per_node, config):
         )
 
     logger.print(f"{torch.randint(0, 100, (1, 1))}")
-    torch.distributed.barrier()
+    if dist.is_available() and dist.is_initialized():
+        torch.distributed.barrier()
 
     trainer.train()
     trainer.test()

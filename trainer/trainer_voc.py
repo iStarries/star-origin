@@ -115,7 +115,8 @@ class Trainer_base(BaseTrainer):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -178,7 +179,8 @@ class Trainer_base(BaseTrainer):
         return log, val_flag
 
     def _valid_epoch(self, epoch):
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
         
         log = {}
         self.evaluator_val.reset()
@@ -229,7 +231,8 @@ class Trainer_base(BaseTrainer):
         return log
 
     def _test(self, epoch=None):
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         log = {}
         self.evaluator_test.reset()
@@ -269,9 +272,9 @@ class Trainer_base(BaseTrainer):
                 if 'old' in met().keys():
                     log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
                 if 'new' in met().keys():
-                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
+                    log.update({met.__name__ + '_new': met()['new']})
                 if 'harmonic' in met().keys():
-                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
+                    log.update({met.__name__ + '_harmonic': met()['harmonic']})
                 if 'overall' in met().keys():
                     log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
                 if 'by_class' in met().keys():
@@ -363,7 +366,8 @@ class Trainer_incremental(Trainer_base):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):

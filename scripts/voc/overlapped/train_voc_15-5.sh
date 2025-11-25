@@ -1,24 +1,25 @@
 #!/bin/bash
 # bash /media/wyh/star/scripts/voc/overlapped/train_voc_15-5.sh
-GPU=0
-BS=24
-SAVEDIR='saved_voc'
+# GPU=0
+# BS=24
+# SAVEDIR='saved_voc'
 
 TASKSETTING='overlap'
-TASKNAME='15-5'
+# TASKNAME='15-5'
 INIT_LR=0.001
 LR=0.0001
 # MEMORY_SIZE=0 # 50 for STAR-M
 # 如需开启 BCE 蒸馏，直接在命令末尾追加： --enable_mbce_distill [--distill_bg_only]
-# 如需调整 memory size，请直接修改对应命令中的 --mem_size 数值。
+# --mem_size 50
+# --epochs 80
 
 NAME='STAR'
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --multiprocessing_distributed --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS}
+-d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${INIT_LR} \
+--task_name '15-5' --task_step 0 \
+--bs 8 --epochs 80
 
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --multiprocessing_distributed --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --freeze_bn \
---mem_size 0 --enable_mbce_distill
-
+-d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+--task_name '15-5' --task_step 1 \
+--bs 8 --mem_size 0 --epochs 80
