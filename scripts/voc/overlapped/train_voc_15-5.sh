@@ -11,7 +11,7 @@ LR=0.0001
 # 如需开启 BCE 蒸馏，直接在命令末尾追加： --enable_mbce_distill [--distill_bg_only]
 # --mem_size 50
 # --epochs 60
-NAME='STAR'
+#NAME='STAR'
 #----------------------------------------------------original
 
 #python train_voc.py -c configs/config_voc.json \
@@ -37,14 +37,14 @@ CONSISTENCY_ARGS="--use_consistency_filter --consistency_old_thresh 0.5 --consis
 SEPARATE_UPDATE_ARGS="--use_separate_old_update --pseudo_grad_scale 1.0"
 
 python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${INIT_LR} \
---task_name '15-5' --task_step 0 --info 'train0-gradient' \
+-d 0 --save_dir 'saved_voc' --task_setting ${TASKSETTING} --lr ${INIT_LR} \
+--task_name '15-5' --task_step 0 --info 'train0-gradient' --name 'gradient05' \
 --bs 24 --epochs 60 --val_every 1
 
 python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
---task_name '15-5' --task_step 1 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} \
---bs 24 --mem_size 0 --epochs 60 --val_every 1 --info 'train1-gradient'
+-d 0 --save_dir 'saved_voc' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn --mem_size 0 \
+--task_name '15-5' --task_step 1 --info 'train1-gradient' --name 'gradient05' ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} \
+--bs 24 --epochs 60 --val_every 1
 #-----------------------------------------------梯度学习器23ing
 
 

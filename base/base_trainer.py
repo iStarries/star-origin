@@ -68,6 +68,7 @@ class BaseTrainer:
 
         self.best_model_path = None
         self.latest_checkpoint_path = None
+        self.latest_checkpoint_epoch = None
         self.best_epoch = None
 
         self.checkpoint_dir = config.save_dir
@@ -144,6 +145,9 @@ class BaseTrainer:
                     self.compute_prototypes(self.config)
                     self.compute_noise(self.config)
                     self.save_prototypes(self.config, epoch)
+
+        if self.rank == 0 and self.latest_checkpoint_epoch != self.epochs:
+            self._save_checkpoint(self.epochs, self.latest_val_metric)
 
         # close TensorboardX
         self._finalize_best_checkpoint()
@@ -413,9 +417,17 @@ class BaseTrainer:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}{self._metric_suffix(metric_value)}.pth")
+        if self.latest_checkpoint_path is not None and self.latest_checkpoint_path != filename:
+            try:
+                Path(self.latest_checkpoint_path).unlink()
+                self.logger.info(f"Removed previous checkpoint: {self.latest_checkpoint_path}")
+            except FileNotFoundError:
+                pass
+
         torch.save(state, filename)
         self.logger.info("Saving checkpoint: {} ...".format(filename))
         self.latest_checkpoint_path = filename
+        self.latest_checkpoint_epoch = epoch
 
     def _save_best_model(self, epoch, metric_value=None):
         """
