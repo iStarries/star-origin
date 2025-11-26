@@ -76,6 +76,10 @@ def main_worker(gpu, ngpus_per_node, config):
     logger = Logger(config.log_dir, rank=rank)
     logger.set_logger(f'train(rank{rank})', verbosity=2)
 
+    run_info = config.config.get('info', '')
+    if run_info:
+        logger.info(f"Info: {run_info}")
+
     # fix random seeds for reproduce
     SEED = config['seed']
     torch.manual_seed(SEED)
@@ -238,12 +242,14 @@ if __name__ == '__main__':
         CustomArgs(['--dist_url'], type=str, target='dist_url'),
 
         CustomArgs(['--name'], type=str, target='name'),
+        CustomArgs(['--info'], type=str, target='info'),
         CustomArgs(['--save_dir'], type=str, target='trainer;save_dir'),
 
         CustomArgs(['--mem_size'], type=int, target='data_loader;args;memory;mem_size'),
 
         CustomArgs(['--seed'], type=int, target='seed'),
         CustomArgs(['--ep', '--epochs'], type=int, target='trainer;epochs'),
+        CustomArgs(['--val_period', '--val_every'], type=int, target='trainer;validation_period'),
         CustomArgs(['--lr', '--learning_rate'], type=float, target='optimizer;args;lr'),
         CustomArgs(['--bs', '--batch_size'], type=int, target='data_loader;args;train;batch_size'),
 

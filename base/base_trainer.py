@@ -371,6 +371,9 @@ class BaseTrainer:
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
             }
+        # 确保 checkpoint 目录存在（防止外部清理或分布式只在部分进程创建目录）
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
         filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}{self._metric_suffix(metric_value)}.pth")
         torch.save(state, filename)
         self.logger.info("Saving checkpoint: {} ...".format(filename))
@@ -405,6 +408,9 @@ class BaseTrainer:
                 'monitor_best': self.mnt_best,
                 # 'config': self.config
             }
+        # 确保 checkpoint 目录存在（防止外部清理或分布式只在部分进程创建目录）
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
         best_path = str(self.checkpoint_dir / f"model_best{self._metric_suffix(metric_value)}.pth")
         torch.save(state, best_path)
         self.logger.info(f"Saving current best: {best_path} ...")
