@@ -263,6 +263,11 @@ if __name__ == '__main__':
         CustomArgs(['--ac'], type=float, target='hyperparameter;ac'),
         CustomArgs(['--enable_mbce_distill'], action='store_true', target='hyperparameter;enable_mbce_distill'),
         CustomArgs(['--distill_bg_only'], action='store_true', target='hyperparameter;distill_bg_only'),
+        CustomArgs(['--use_consistency_filter'], action='store_true', target='hyperparameter;use_consistency_filter'),
+        CustomArgs(['--consistency_old_thresh'], type=float, target='hyperparameter;consistency_old_thresh'),
+        CustomArgs(['--consistency_curr_thresh'], type=float, target='hyperparameter;consistency_curr_thresh'),
+        CustomArgs(['--use_separate_old_update'], action='store_true', target='hyperparameter;use_separate_old_update'),
+        CustomArgs(['--pseudo_grad_scale'], type=float, target='hyperparameter;pseudo_grad_scale'),
 
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
