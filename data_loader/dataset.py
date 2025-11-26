@@ -55,6 +55,9 @@ class VOCSegmentationIncremental(BaseDataset):
         self.im_ids = []
         self.categories = []
 
+        # 若未初始化分布式环境，默认为单进程 rank 0，避免 get_rank 触发错误
+        rank = distributed.get_rank() if distributed.is_initialized() else 0
+
         if (idxs_path is not None) and (os.path.exists(idxs_path)):
             self.im_ids = np.load(idxs_path).tolist()
             for x in self.im_ids:

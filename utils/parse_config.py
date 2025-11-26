@@ -21,6 +21,7 @@ class ConfigParser:
         """
         # load config file and apply modification
         self._config = _update_config(config, modification)
+        self._config.setdefault('info', '')
         self.resume = resume
         self.run_id = run_id
 

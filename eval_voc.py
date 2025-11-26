@@ -2,7 +2,7 @@
 CUDA_VISIBLE_DEVICES=0 python eval_voc.py \
   -c /media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_1/config.json \
   -r /media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_1/checkpoint-epoch60.pth \
-  --device 0 --test
+  --device 0 --test --info 'test-bs24-epochs80'
 
 '''
 

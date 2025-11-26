@@ -2,7 +2,7 @@
     "name": "STAR",
     
     "n_gpu": 1,
-    "multiprocessing_distributed": false,
+    "multiprocessing_distributed": true,
     "rank": 0,
     "world_size": 1,
     "dist_backend": "nccl",
