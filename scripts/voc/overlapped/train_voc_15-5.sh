@@ -45,17 +45,17 @@ NAME='STAR'
 #--val_every 10 --info 'train1-bs24-epochs60'
 #
 ###原生60次迭代加上软标签和过滤背景软标签有没有变好
-#python train_voc.py -c configs/config_voc.json \
-#-d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
-#--task_name '15-5' --task_step 1 \
-#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill \
-#--val_every 2 --info 'train1-bs24-epochs60-enable_mbce_distill'
+python train_voc.py -c configs/config_voc.json \
+-d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+--task_name '15-5' --task_step 1 \
+--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill \
+--val_every 2 --info 'train1-bs24-epochs60-enable_mbce_distill'
 ##
-#python train_voc.py -c configs/config_voc.json \
-#-d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
-#--task_name '15-5' --task_step 1 \
-#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --distill_bg_only \
-#--val_every 2 --info 'train1-bs24-epochs60-distill_bg_only'
+python train_voc.py -c configs/config_voc.json \
+-d 0 --save_dir 'saved_voc' --name ${NAME} --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+--task_name '15-5' --task_step 1 \
+--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --distill_bg_only \
+--val_every 2 --info 'train1-bs24-epochs60-distill_bg_only'
 
 
 
