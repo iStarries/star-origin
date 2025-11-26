@@ -81,8 +81,8 @@
         "pkd": 5,
         "cont": 0.05,
         "use_consistency_filter": false,
-        "consistency_old_thresh": 0.7,
-        "consistency_curr_thresh": 0.7,
+        "consistency_old_thresh": 0.5,
+        "consistency_curr_thresh": 0.5,
         "use_separate_old_update": false,
         "pseudo_grad_scale": 1.0
     },

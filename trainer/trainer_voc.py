@@ -469,15 +469,24 @@ class Trainer_incremental(Trainer_base):
                          f"{self.config['hyperparameter']['pkd']} * L_pkd")
 
     def _resolve_prev_info_path(self, config):
-        prev_step = config['data_loader']['args']['task']['step'] - 1
-        prev_dir_candidates = sorted(Path(config.save_dir).parent.glob(f"step_{prev_step}_*"))
+        prev_best_checkpoint = config.config.get('prev_best_checkpoint', None)
 
-        if prev_dir_candidates:
-            prev_dir = prev_dir_candidates[-1]
+        if prev_best_checkpoint is None:
+            prev_step = config['data_loader']['args']['task']['step'] - 1
+            prev_dir_candidates = sorted(Path(config.save_dir).parent.glob(f"step_{prev_step}_*"))
+
+            if prev_dir_candidates:
+                prev_dir = prev_dir_candidates[-1]
+            else:
+                prev_dir = Path(config.save_dir).parent / f"step_{prev_step}"
+
+            target_epoch = config['trainer']['epochs']
         else:
-            prev_dir = Path(config.save_dir).parent / f"step_{prev_step}"
+            prev_dir = Path(prev_best_checkpoint).parent
+            prev_checkpoint = torch.load(prev_best_checkpoint, map_location='cpu')
+            target_epoch = prev_checkpoint.get('epoch', config['trainer']['epochs'])
 
-        return prev_dir / f"prototypes-epoch{config['trainer']['epochs']}.pth"
+        return prev_dir / f"prototypes-epoch{target_epoch}.pth"
 
     def _train_epoch(self, epoch):
         """

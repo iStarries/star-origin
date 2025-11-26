@@ -1,4 +1,5 @@
 import os.path
+import shutil
 
 import torch
 import torch.distributed as dist
@@ -8,6 +9,7 @@ import torch.nn.functional as F
 from abc import abstractmethod
 from numpy import inf
 from logger import TensorboardWriter
+from pathlib import Path
 
 
 
@@ -63,6 +65,10 @@ class BaseTrainer:
 
         self.metric_tag = None if self.mnt_metric is None else self.mnt_metric.replace('/', '-').replace(' ', '')
         self.latest_val_metric = None
+
+        self.best_model_path = None
+        self.latest_checkpoint_path = None
+        self.best_epoch = None
 
         self.checkpoint_dir = config.save_dir
 
@@ -140,6 +146,7 @@ class BaseTrainer:
                     self.save_prototypes(self.config, epoch)
 
         # close TensorboardX
+        self._finalize_best_checkpoint()
         self.writer.close()
 
     def save_prototypes(self, config, epoch):
@@ -330,6 +337,12 @@ class BaseTrainer:
         list_ids = list(range(n_gpu_use))
         return device, list_ids
 
+    def _load_model_state(self, state_dict):
+        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            self.model.module.load_state_dict(state_dict)
+        else:
+            self.model.load_state_dict(state_dict)
+
     def _metric_suffix(self, metric_value):
         if metric_value is None or self.metric_tag is None:
             return ''
@@ -342,6 +355,31 @@ class BaseTrainer:
         except (TypeError, ValueError):
             metric_fmt = str(metric_value)
         return f"-{metric_clean}-{metric_fmt}"
+
+    def _finalize_best_checkpoint(self):
+        if self.rank != 0:
+            return
+
+        source_path = self.best_model_path or self.latest_checkpoint_path
+        if source_path is None or not Path(source_path).exists():
+            self.logger.warning("No checkpoint available to export as best.pth.")
+            return
+
+        best_copy_path = self.checkpoint_dir / "best.pth"
+        shutil.copyfile(source_path, best_copy_path)
+        self.logger.info(f"Saving final best copy: {best_copy_path} ...")
+
+        checkpoint = torch.load(best_copy_path, map_location='cpu')
+        self.best_epoch = checkpoint.get('epoch', self.best_epoch)
+        self._load_model_state(checkpoint['state_dict'])
+        self.mnt_best = checkpoint.get('monitor_best', self.mnt_best)
+
+        if self.best_epoch is None:
+            self.best_epoch = self.epochs
+
+        self.compute_prototypes(self.config)
+        self.compute_noise(self.config)
+        self.save_prototypes(self.config, self.best_epoch)
 
     def _save_checkpoint(self, epoch, metric_value=None):
         """
@@ -377,6 +415,7 @@ class BaseTrainer:
         filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}{self._metric_suffix(metric_value)}.pth")
         torch.save(state, filename)
         self.logger.info("Saving checkpoint: {} ...".format(filename))
+        self.latest_checkpoint_path = filename
 
     def _save_best_model(self, epoch, metric_value=None):
         """
@@ -411,9 +450,20 @@ class BaseTrainer:
         # 确保 checkpoint 目录存在（防止外部清理或分布式只在部分进程创建目录）
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        best_path = str(self.checkpoint_dir / f"model_best{self._metric_suffix(metric_value)}.pth")
+        best_filename = f"best-epoch{epoch}{self._metric_suffix(metric_value)}.pth"
+        best_path = str(self.checkpoint_dir / best_filename)
         torch.save(state, best_path)
         self.logger.info(f"Saving current best: {best_path} ...")
+
+        if self.best_model_path is not None and self.best_model_path != best_path:
+            try:
+                Path(self.best_model_path).unlink()
+                self.logger.info(f"Removed previous best checkpoint: {self.best_model_path}")
+            except FileNotFoundError:
+                pass
+
+        self.best_model_path = best_path
+        self.best_epoch = epoch
 
     def _resume_checkpoint(self, resume_path, test=False):
         """

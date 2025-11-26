@@ -32,6 +32,11 @@ class BCELoss(nn.Module):
         # logit_old: [N, C_prev, H, W]
         # label:     [N, H, W] or [N, C, H, W]
         C = logit.shape[1]
+        valid_labels = label[label != self.ignore_index]
+        max_label = valid_labels.max().item() if valid_labels.numel() > 0 else -1
+        # If logits do not include background channel (C == max_label), shift
+        # semantic class ids by 1 so class k maps to channel k-1.
+        channel_offset = 1 if max_label >= C else 0
         if logit_old is None:
             if len(label.shape) == 3:
                 # target: [N, C, H, W]
@@ -39,7 +44,9 @@ class BCELoss(nn.Module):
                 for cls_idx in label.unique():
                     if cls_idx in self.ignore_indexes:
                         continue
-                    target[:, int(cls_idx)] = (label == int(cls_idx)).float()
+                    channel_idx = int(cls_idx) - channel_offset
+                    if 0 <= channel_idx < C:
+                        target[:, channel_idx] = (label == int(cls_idx)).float()
             elif len(label.shape) == 4:
                 target = label
             else:
@@ -54,17 +61,19 @@ class BCELoss(nn.Module):
                 # target: [N, C, H, W]
                 target = torch.zeros_like(logit).float().to(logit.device)
 
-                teacher_prob = logit_old.sigmoid()[:, 1:]
+                teacher_prob = logit_old.sigmoid()
                 if self.distill_bg_only:
                     bg_mask = (label == 0).unsqueeze(1)  # [N,1,H,W]
                     teacher_prob = teacher_prob * bg_mask
 
-                target[:, 1:logit_old.shape[1]] = teacher_prob
+                target[:, :logit_old.shape[1]] = teacher_prob
 
                 for cls_idx in label.unique():
                     if cls_idx in self.ignore_indexes:
                         continue
-                    target[:, int(cls_idx)] = (label == int(cls_idx)).float()
+                    channel_idx = int(cls_idx) - channel_offset
+                    if 0 <= channel_idx < C:
+                        target[:, channel_idx] = (label == int(cls_idx)).float()
             else:
                 raise NotImplementedError
             

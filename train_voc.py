@@ -22,18 +22,30 @@ from logger.logger import Logger
 from utils.memory import memory_sampling_balanced
 
 
-def _resolve_prev_checkpoint(save_dir: Path, prev_step: int, epochs: int) -> Path:
-    """Find the previous step checkpoint, handling timestamped run folders and metric suffixes."""
+def _resolve_prev_checkpoint(save_dir: Path, prev_step: int) -> Path:
+    """Find the previous step best checkpoint, with fallbacks for legacy names."""
 
     base_dir = save_dir.parent
-    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/checkpoint-epoch{epochs}*.pth"))
+    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/best.pth"))
 
     if not candidates:
-        candidates = sorted((base_dir / f"step_{prev_step}").glob(f"checkpoint-epoch{epochs}*.pth"))
+        candidates = sorted(base_dir.glob(f"step_{prev_step}_*/best-epoch*.pth"))
+
+    if not candidates:
+        candidates = sorted((base_dir / f"step_{prev_step}").glob("best.pth"))
+
+    if not candidates:
+        candidates = sorted((base_dir / f"step_{prev_step}").glob("best-epoch*.pth"))
+
+    if not candidates:
+        candidates = sorted(base_dir.glob(f"step_{prev_step}_*/checkpoint-epoch*.pth"))
+
+    if not candidates:
+        candidates = sorted((base_dir / f"step_{prev_step}").glob(f"checkpoint-epoch*.pth"))
 
     if not candidates:
         raise FileNotFoundError(
-            f"No checkpoint found for step {prev_step} under {base_dir} with epoch {epochs}")
+            f"No checkpoint found for step {prev_step} under {base_dir}")
 
     return candidates[-1]
 
@@ -141,7 +153,8 @@ def main_worker(gpu, ngpus_per_node, config):
 
     # Load previous step weights
     if task_step > 0:
-        old_path = _resolve_prev_checkpoint(config.save_dir, task_step - 1, config['trainer']['epochs'])
+        old_path = _resolve_prev_checkpoint(config.save_dir, task_step - 1)
+        config.config['prev_best_checkpoint'] = str(old_path)
         model._load_pretrained_model(f'{old_path}')
         logger.info(f"Load weights from a previous step:{old_path}")
 
