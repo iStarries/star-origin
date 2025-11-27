@@ -1,7 +1,8 @@
 {
     "name": "STAR",
+    
     "n_gpu": 1,
-    "multiprocessing_distributed": true,
+    "multiprocessing_distributed": false,
     "rank": 0,
     "world_size": 1,
     "dist_backend": "nccl",
@@ -14,15 +15,15 @@
             "output_stride": 16,
             "norm_act": "bn_sync",
             "backbone_pretrained": true,
-            "freeze_all_bn": true
+            "freeze_all_bn": false
         }
     },
     "data_loader": {
-        "type": "VOCIncrementalDataLoader",
+        "type": "ADEIncrementalDataLoader",
         "args": {
             "task": {
-                "name": "15-5",
-                "step": 1,
+                "name": "100-50",
+                "step": 0,
                 "setting": "overlap",
                 "idxs_path": "./data/"
             },
@@ -43,7 +44,7 @@
                     "transform_args": {
                         "crop_size": 512
                     },
-                    "masking_value": 0
+                    "masking_value": 255
                 },
                 "batch_size": 1
             },
@@ -53,35 +54,33 @@
                     "transform_args": {
                         "crop_size": 512
                     },
-                    "masking_value": 0
+                    "masking_value": 255
                 },
                 "batch_size": 1
             },
             "num_workers": 4,
             "pin_memory": true,
-            "memory": {
-                "mem_size": 0
-            }
+            "memory": {"mem_size": 0}
         }
     },
     "optimizer": {
         "type": "SGD",
         "args": {
-            "lr": 0.0001,
-            "weight_decay": 0.0001,
+            "lr": 0.0025,
+            "weight_decay": 1e-4,
             "momentum": 0.9,
             "nesterov": true
         }
     },
     "hyperparameter": {
-        "pos_weight": 4.0,
+        "pos_weight": 30,
         "mbce": 1,
         "pkd": 5,
         "cont": 0.05
     },
     "lr_scheduler": {
-        "type": "PolyLR",
-        "args": {}
+        "type": "WarmupPolyLR",
+        "args": {"warmup_iters": 0.2}
     },
     "evaluator": {
         "type": "Evaluator",
@@ -93,15 +92,14 @@
         "Mean_Intersection_over_Union"
     ],
     "trainer": {
-        "epochs": 60,
-        "save_dir": "saved_voc/full_model",
-        "save_period": -1,
+        "epochs": 100,
+        "save_dir": "saved_ade/",
+        "save_period": 10,
         "validation_period": 10,
         "verbosity": 2,
         "monitor": "off",
         "early_stop": -1,
         "reset_best_mnt": false,
         "tensorboard": false
-    },
-    "test": false
+    }
 }
