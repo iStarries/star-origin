@@ -1,6 +1,7 @@
 import argparse
 import random
 import collections
+import re
 from pathlib import Path
 
 import numpy as np
@@ -22,32 +23,47 @@ from logger.logger import Logger
 from utils.memory import memory_sampling_balanced
 
 
+def _pick_latest_by_epoch(candidates):
+    epoch_re = re.compile(r"epoch(\d+)")
+    best = None
+    best_epoch = -1
+    for path in candidates:
+        match = epoch_re.search(path.name)
+        if match:
+            epoch = int(match.group(1))
+            if epoch > best_epoch:
+                best_epoch = epoch
+                best = path
+    return best if best is not None else (candidates[-1] if candidates else None)
+
+
 def _resolve_prev_checkpoint(save_dir: Path, prev_step: int) -> Path:
-    """Find the previous step best checkpoint, with fallbacks for legacy names."""
+    """查找上一阶段的 checkpoint，优先选择最终 epoch 的权重。"""
 
     base_dir = save_dir.parent
-    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/best.pth"))
-
-    if not candidates:
-        candidates = sorted(base_dir.glob(f"step_{prev_step}_*/best-epoch*.pth"))
-
-    if not candidates:
-        candidates = sorted((base_dir / f"step_{prev_step}").glob("best.pth"))
-
-    if not candidates:
-        candidates = sorted((base_dir / f"step_{prev_step}").glob("best-epoch*.pth"))
-
-    if not candidates:
-        candidates = sorted(base_dir.glob(f"step_{prev_step}_*/checkpoint-epoch*.pth"))
+    # 首选最后一个 epoch 的权重，其次才回退到历史最佳（兼容旧命名）
+    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/checkpoint-epoch*.pth"))
 
     if not candidates:
         candidates = sorted((base_dir / f"step_{prev_step}").glob(f"checkpoint-epoch*.pth"))
 
-    if not candidates:
-        raise FileNotFoundError(
-            f"No checkpoint found for step {prev_step} under {base_dir}")
+    chosen = _pick_latest_by_epoch(candidates)
 
-    return candidates[-1]
+    if chosen:
+        return chosen
+
+    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/best-epoch*.pth"))
+
+    if not candidates:
+        candidates = sorted((base_dir / f"step_{prev_step}").glob("best-epoch*.pth"))
+
+    chosen = _pick_latest_by_epoch(candidates)
+
+    if chosen:
+        return chosen
+
+    raise FileNotFoundError(
+        f"No checkpoint found for step {prev_step} under {base_dir}")
 
 torch.backends.cudnn.benchmark = True
 
@@ -153,10 +169,18 @@ def main_worker(gpu, ngpus_per_node, config):
 
     # Load previous step weights
     if task_step > 0:
-        old_path = _resolve_prev_checkpoint(config.save_dir, task_step - 1)
-        config.config['prev_best_checkpoint'] = str(old_path)
+        manual_prev = config.config.get('prev_best_checkpoint')
+        if manual_prev is not None:
+            old_path = Path(manual_prev)
+            if not old_path.exists():
+                raise FileNotFoundError(f"Provided prev_best_checkpoint does not exist: {old_path}")
+            logger.info(f"Load weights from a user-provided previous step: {old_path}")
+        else:
+            old_path = _resolve_prev_checkpoint(config.save_dir, task_step - 1)
+            config.config['prev_best_checkpoint'] = str(old_path)
+            logger.info(f"Load weights from a previous step:{old_path}")
+
         model._load_pretrained_model(f'{old_path}')
-        logger.info(f"Load weights from a previous step:{old_path}")
 
         # Load old model to use KD
         if model_old is not None:
@@ -272,6 +296,7 @@ if __name__ == '__main__':
 
         CustomArgs(['--pos_weight'], type=float, target='hyperparameter;pos_weight'),
         CustomArgs(['--mbce'], type=float, target='hyperparameter;mbce'),
+        CustomArgs(['--mbce_distill'], type=float, target='hyperparameter;mbce_distill'),
         CustomArgs(['--kd'], type=float, target='hyperparameter;kd'),
         CustomArgs(['--ac'], type=float, target='hyperparameter;ac'),
         CustomArgs(['--enable_mbce_distill'], action='store_true', target='hyperparameter;enable_mbce_distill'),
@@ -284,6 +309,9 @@ if __name__ == '__main__':
 
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
+
+        CustomArgs(['--prev_best_checkpoint'], type=str, target='prev_best_checkpoint'),
+        CustomArgs(['--prev_prototypes_path'], type=str, target='prev_prototypes_path'),
     ]
     config = ConfigParser.from_args(args, options)
     main(config)

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -130,7 +131,15 @@ class DeepLabV3(nn.Module):
                 m.eval()
 
     def _load_pretrained_model(self, pretrained_path):
-        pretrain_dict = torch.load(pretrained_path, map_location=torch.device('cpu'))
+        try:
+            pretrain_dict = torch.load(pretrained_path, map_location=torch.device('cpu'))
+        except RuntimeError as e:
+            if "PytorchStreamReader failed reading zip archive" in str(e):
+                file_hint = "" if not os.path.exists(pretrained_path) else f" (文件大小 {os.path.getsize(pretrained_path)} 字节)"
+                raise RuntimeError(
+                    f"无法读取权重文件 {pretrained_path}{file_hint}，文件可能损坏或未完整保存，请重新导出或复制该检查点。"
+                ) from e
+            raise
         self.load_state_dict(pretrain_dict['state_dict'], strict=False)
 
     def _set_bn_momentum(self, model=None, momentum=0.1):

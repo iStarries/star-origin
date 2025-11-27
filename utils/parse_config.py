@@ -52,6 +52,7 @@ class ConfigParser:
             if self.config['test'] is True:
                 run_id = datetime.now().strftime(r'%m%d_%H%M%S')
                 self._save_dir = save_dir / 'models' / exper_name / f'test_{run_id}'
+                self._log_dir = self._save_dir
                 self.save_dir.mkdir(parents=True, exist_ok=exist_ok)
                 pass
             else:

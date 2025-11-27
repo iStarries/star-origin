@@ -1,5 +1,4 @@
 import os.path
-import shutil
 
 import torch
 import torch.distributed as dist
@@ -72,6 +71,10 @@ class BaseTrainer:
         self.best_epoch = None
 
         self.checkpoint_dir = config.save_dir
+
+        # 梯度学习器（若存在）的状态与优化器，会在保存/恢复时一并处理
+        self.grad_learner = None
+        self.grad_optimizer = None
 
 
         # if config.resume is not None:
@@ -347,6 +350,27 @@ class BaseTrainer:
         else:
             self.model.load_state_dict(state_dict)
 
+    def _maybe_get_grad_learner_state(self):
+        if self.grad_learner is None:
+            return None
+        if isinstance(self.grad_learner, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            return self.grad_learner.module.state_dict()
+        return self.grad_learner.state_dict()
+
+    def _maybe_get_grad_optimizer_state(self):
+        if self.grad_optimizer is None:
+            return None
+        return self.grad_optimizer.state_dict()
+
+    def _load_grad_learner_state(self, state_dict):
+        if self.grad_learner is None:
+            self.logger.warning("检查点包含梯度学习器状态，但当前 Trainer 未初始化梯度学习器，已跳过加载。")
+            return
+        if isinstance(self.grad_learner, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            self.grad_learner.module.load_state_dict(state_dict)
+        else:
+            self.grad_learner.load_state_dict(state_dict)
+
     def _metric_suffix(self, metric_value):
         if metric_value is None or self.metric_tag is None:
             return ''
@@ -364,16 +388,13 @@ class BaseTrainer:
         if self.rank != 0:
             return
 
-        source_path = self.best_model_path or self.latest_checkpoint_path
+        # 对外发布/后续步骤加载统一使用最后一个 epoch 的权重，避免与历史最佳不一致
+        source_path = self.latest_checkpoint_path or self.best_model_path
         if source_path is None or not Path(source_path).exists():
-            self.logger.warning("No checkpoint available to export as best.pth.")
+            self.logger.warning("No checkpoint available to finalize prototypes/noise from.")
             return
 
-        best_copy_path = self.checkpoint_dir / "best.pth"
-        shutil.copyfile(source_path, best_copy_path)
-        self.logger.info(f"Saving final best copy: {best_copy_path} ...")
-
-        checkpoint = torch.load(best_copy_path, map_location='cpu')
+        checkpoint = torch.load(source_path, map_location='cpu')
         self.best_epoch = checkpoint.get('epoch', self.best_epoch)
         self._load_model_state(checkpoint['state_dict'])
         self.mnt_best = checkpoint.get('monitor_best', self.mnt_best)
@@ -381,6 +402,7 @@ class BaseTrainer:
         if self.best_epoch is None:
             self.best_epoch = self.epochs
 
+        self.logger.info(f"Using final checkpoint to export prototypes/noise: {source_path}")
         self.compute_prototypes(self.config)
         self.compute_noise(self.config)
         self.save_prototypes(self.config, self.best_epoch)
@@ -402,6 +424,8 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
         else:
             state = {
@@ -412,6 +436,8 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
         # 确保 checkpoint 目录存在（防止外部清理或分布式只在部分进程创建目录）
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -431,51 +457,11 @@ class BaseTrainer:
 
     def _save_best_model(self, epoch, metric_value=None):
         """
-        Saving checkpoints
-
-        :param epoch: current epoch number
-        :param log: logging information of the epoch
+        仅记录最佳指标，不额外写出 best-*.pth 文件。
         """
-        arch = type(self.model).__name__
-        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            state = {
-                'arch': arch,
-                'epoch': epoch,
-                'state_dict': self.model.module.state_dict(),
-                'optimizer': self.optimizer.state_dict(),
-                'lr_scheduler': self.lr_scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                'monitor_best': self.mnt_best,
-                # 'config': self.config
-            }
-        else:
-            state = {
-                'arch': arch,
-                'epoch': epoch,
-                'state_dict': self.model.state_dict(),
-                'optimizer': self.optimizer.state_dict(),
-                'lr_scheduler': self.lr_scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                'monitor_best': self.mnt_best,
-                # 'config': self.config
-            }
-        # 确保 checkpoint 目录存在（防止外部清理或分布式只在部分进程创建目录）
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-        best_filename = f"best-epoch{epoch}{self._metric_suffix(metric_value)}.pth"
-        best_path = str(self.checkpoint_dir / best_filename)
-        torch.save(state, best_path)
-        self.logger.info(f"Saving current best: {best_path} ...")
-
-        if self.best_model_path is not None and self.best_model_path != best_path:
-            try:
-                Path(self.best_model_path).unlink()
-                self.logger.info(f"Removed previous best checkpoint: {self.best_model_path}")
-            except FileNotFoundError:
-                pass
-
-        self.best_model_path = best_path
         self.best_epoch = epoch
+        self.best_model_path = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}{self._metric_suffix(metric_value)}.pth")
+        self.logger.info(f"Tracking current best checkpoint (will rely on checkpoint file): {self.best_model_path}")
 
     def _resume_checkpoint(self, resume_path, test=False):
         """
@@ -496,11 +482,20 @@ class BaseTrainer:
         else:
             self.model.load_state_dict(checkpoint['state_dict'])
 
+        grad_state = checkpoint.get('grad_learner', None)
+        if grad_state is not None:
+            self._load_grad_learner_state(grad_state)
+
         if test is False:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             self.scaler.load_state_dict(checkpoint['scaler'])
-        
+
+            if self.grad_optimizer is not None and 'grad_optimizer' in checkpoint:
+                self.grad_optimizer.load_state_dict(checkpoint['grad_optimizer'])
+            elif self.grad_optimizer is not None and grad_state is not None:
+                self.logger.warning("检查点包含梯度学习器，但缺少其优化器状态，已跳过 grad_optimizer 加载。")
+
         self.logger.info("Checkpoint loaded. Resume training from epoch {}".format(self.start_epoch))
 
 def label_to_one_hot(label, logit, n_old_classes, ignore_index=255):

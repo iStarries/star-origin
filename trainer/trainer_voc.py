@@ -469,6 +469,10 @@ class Trainer_incremental(Trainer_base):
                          f"{self.config['hyperparameter']['pkd']} * L_pkd")
 
     def _resolve_prev_info_path(self, config):
+        manual_proto = config.config.get('prev_prototypes_path', None)
+        if manual_proto is not None:
+            return Path(manual_proto)
+
         prev_best_checkpoint = config.config.get('prev_best_checkpoint', None)
 
         if prev_best_checkpoint is None:
@@ -555,15 +559,18 @@ class Trainer_incremental(Trainer_base):
                        + self.config['hyperparameter']['pkd'] * loss_dict['loss_pkd'].sum() \
                        + self.config['hyperparameter']['cont'] * loss_dict['loss_cont']
 
+            opt_stepped = False
             if not self.use_separate_old_update:
                 loss = loss_main + loss_old
                 self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
+                step_result = self.scaler.step(self.optimizer)
+                opt_stepped = opt_stepped or (step_result is not None)
                 self.scaler.update()
             else:
                 # 主监督更新
                 self.scaler.scale(loss_main).backward()
-                self.scaler.step(self.optimizer)
+                step_result = self.scaler.step(self.optimizer)
+                opt_stepped = opt_stepped or (step_result is not None)
                 self.scaler.update()
 
                 # 独立的旧类伪梯度/蒸馏更新
@@ -576,12 +583,13 @@ class Trainer_incremental(Trainer_base):
                 if loss_old_step.requires_grad:
                     loss_old_scaled = self.pseudo_grad_scale * loss_old_step
                     self.scaler.scale(loss_old_scaled).backward()
-                    self.scaler.step(self.optimizer)
+                    step_result_old = self.scaler.step(self.optimizer)
+                    opt_stepped = opt_stepped or (step_result_old is not None)
                     self.scaler.update()
                 loss_old = loss_old_step
 
-            # 统一的 lr_scheduler 步进
-            if self.lr_scheduler is not None:
+            # 统一的 lr_scheduler 步进（仅在本轮确实执行了 optimizer.step 时）
+            if self.lr_scheduler is not None and opt_stepped:
                 self.lr_scheduler.step()
 
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
