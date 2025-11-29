@@ -306,6 +306,8 @@ if __name__ == '__main__':
         CustomArgs(['--consistency_curr_thresh'], type=float, target='hyperparameter;consistency_curr_thresh'),
         CustomArgs(['--use_separate_old_update'], action='store_true', target='hyperparameter;use_separate_old_update'),
         CustomArgs(['--pseudo_grad_scale'], type=float, target='hyperparameter;pseudo_grad_scale'),
+        CustomArgs(['--enable_phase_replay'], action='store_true', target='hyperparameter;enable_phase_replay'),
+        CustomArgs(['--phase_replay_weight'], type=float, target='hyperparameter;phase_replay_weight'),
 
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),

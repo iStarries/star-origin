@@ -76,6 +76,12 @@ class BaseTrainer:
         self.grad_learner = None
         self.grad_optimizer = None
 
+        # 频域相位原型库（Phase Prototype Bank）相关缓存
+        self.phase_proto = None
+        self.phase_amp_mean = None
+        self.phase_amp_std = None
+        self.phase_counts = None
+
 
         # if config.resume is not None:
         #     self._resume_checkpoint(config.resume)
@@ -147,6 +153,7 @@ class BaseTrainer:
 
                     self.compute_prototypes(self.config)
                     self.compute_noise(self.config)
+                    self.compute_phase_prototypes(self.config)
                     self.save_prototypes(self.config, epoch)
 
         if self.rank == 0 and self.latest_checkpoint_epoch != self.epochs:
@@ -163,8 +170,16 @@ class BaseTrainer:
             "numbers": self.numbers,
             "prototypes": self.prototypes,
             "norm_mean_and_std": self.norm_mean_and_std,
-            "noise": self.noise
+            "noise": self.noise,
         }
+
+        if self.phase_proto is not None:
+            all_info.update({
+                "phase_proto": self.phase_proto,
+                "phase_amp_mean": self.phase_amp_mean,
+                "phase_amp_std": self.phase_amp_std,
+                "phase_counts": self.phase_counts,
+            })
 
         torch.save(all_info, save_file)
 
@@ -306,7 +321,107 @@ class BaseTrainer:
                 self.noise = noise
             else:
                 self.noise = torch.cat([self.prev_noise, noise], dim=0)
-            
+
+        self.model.train()
+
+    def compute_phase_prototypes(self, config):
+        hp = config['hyperparameter']
+        if not hp.get('enable_phase_replay', False):
+            return
+
+        ratio = hp.get('phase_mid_ratio', 0.5)
+        momentum = hp.get('phase_proto_momentum', 0.01)
+
+        n_new_classes = self.n_new_classes
+        n_old_classes = self.n_old_classes
+
+        self.logger.info("computing phase prototypes (FFT-based)...")
+        self.model.eval()
+
+        cos_acc = None
+        sin_acc = None
+        amp_mean = None
+        amp_var = None
+        counts = torch.zeros(n_new_classes, device=self.device)
+
+        with torch.no_grad():
+            for batch_idx, data in enumerate(self.train_loader):
+                images = data['image'].to(self.device)
+                labels = data['label'].to(self.device)
+
+                _, features, _ = self.model(images, ret_intermediate=True)
+                feat = features[-1]
+
+                _, _, h, w = feat.shape
+                h_mid = int(h * ratio)
+                w_mid = int(w * ratio)
+                h0 = (h - h_mid) // 2
+                w0 = (w - w_mid) // 2
+                h1 = h0 + h_mid
+                w1 = w0 + w_mid
+
+                target = label_to_one_hot(labels, feat[:, -n_new_classes:], n_old_classes)
+                small_label = labels[:, 8::16, 8::16]
+
+                for cls_idx in small_label.unique():
+                    if cls_idx in [0, 255]:
+                        continue
+
+                    cls_local = int(cls_idx) - n_old_classes - 1
+                    if cls_local < 0 or cls_local >= n_new_classes:
+                        continue
+
+                    mask = target[:, cls_local:cls_local + 1]
+                    if mask.sum() == 0:
+                        continue
+
+                    # 提取该类的特征并做 FFT
+                    cls_feat = feat * mask
+                    cls_fft = torch.fft.fft2(cls_feat, dim=(-2, -1))
+                    cls_amp = torch.abs(cls_fft)
+                    cls_phase = torch.angle(cls_fft)
+
+                    amp_mid = cls_amp[:, :, h0:h1, w0:w1].mean(dim=0)
+                    phase_mid = cls_phase[:, :, h0:h1, w0:w1].mean(dim=0)
+                    cos_mid = torch.cos(phase_mid)
+                    sin_mid = torch.sin(phase_mid)
+
+                    if cos_acc is None:
+                        cos_acc = torch.zeros(n_new_classes, *cos_mid.shape, device=self.device)
+                        sin_acc = torch.zeros_like(cos_acc)
+                        amp_mean = torch.zeros(n_new_classes, *amp_mid.shape, device=self.device)
+                        amp_var = torch.zeros_like(amp_mean)
+
+                    beta = momentum
+                    cos_acc[cls_local] = (1 - beta) * cos_acc[cls_local] + beta * cos_mid
+                    sin_acc[cls_local] = (1 - beta) * sin_acc[cls_local] + beta * sin_mid
+
+                    delta = amp_mid - amp_mean[cls_local]
+                    amp_mean[cls_local] = amp_mean[cls_local] + beta * delta
+                    amp_var[cls_local] = (1 - beta) * amp_var[cls_local] + beta * delta * (amp_mid - amp_mean[cls_local])
+                    counts[cls_local] += 1
+
+                self.progress(self.logger, batch_idx, len(self.train_loader))
+
+        if cos_acc is None:
+            self.logger.info("no valid class pixels found for phase prototypes")
+            self.model.train()
+            return
+
+        phase_proto = torch.atan2(sin_acc, cos_acc)
+        amp_std = torch.sqrt(amp_var + 1e-6)
+
+        if config['data_loader']['args']['task']['step'] == 0 or self.phase_proto is None:
+            self.phase_proto = phase_proto
+            self.phase_amp_mean = amp_mean
+            self.phase_amp_std = amp_std
+            self.phase_counts = counts
+        else:
+            self.phase_proto = torch.cat([self.phase_proto, phase_proto], dim=0)
+            self.phase_amp_mean = torch.cat([self.phase_amp_mean, amp_mean], dim=0)
+            self.phase_amp_std = torch.cat([self.phase_amp_std, amp_std], dim=0)
+            self.phase_counts = torch.cat([self.phase_counts, counts], dim=0)
+
         self.model.train()
 
     def test(self):
@@ -405,6 +520,7 @@ class BaseTrainer:
         self.logger.info(f"Using final checkpoint to export prototypes/noise: {source_path}")
         self.compute_prototypes(self.config)
         self.compute_noise(self.config)
+        self.compute_phase_prototypes(self.config)
         self.save_prototypes(self.config, self.best_epoch)
 
     def _save_checkpoint(self, epoch, metric_value=None):

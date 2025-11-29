@@ -88,6 +88,14 @@ class Trainer_base(BaseTrainer):
         self.distill_bg_only = self.config['hyperparameter'].get('distill_bg_only', False)
         self.DistillBCELoss = BCELoss(reduction='none', distill_bg_only=self.distill_bg_only)
 
+        # 频域相位回放相关超参
+        hp = self.config['hyperparameter']
+        self.enable_phase_replay = hp.get('enable_phase_replay', False)
+        self.phase_replay_weight = hp.get('phase_replay_weight', 0.0)
+        self.phase_old_per_batch = hp.get('phase_old_per_batch', 3)
+        self.phase_mid_ratio = hp.get('phase_mid_ratio', 0.5)
+        self.phase_proto_momentum = hp.get('phase_proto_momentum', 0.01)
+
         self.mbce_weight = self.config['hyperparameter']['mbce']
         self.mbce_distill_weight = self.config['hyperparameter'].get('mbce_distill', self.mbce_weight)
 
@@ -281,13 +289,64 @@ class Trainer_base(BaseTrainer):
             loss_cont = self.ContLoss(
                 features[-1], logit[:, -self.n_new_classes:], data['label'], self.prev_prototypes)
 
+            loss_phase_replay = self._phase_replay_loss(features)
+
         return {
             'loss_mbce': loss_mbce,
             'loss_mbce_distill': loss_mbce_distill,
             'loss_pkd': loss_pkd,
             'loss_cont': loss_cont,
+            'loss_phase_replay': loss_phase_replay,
             'consistency_ratio': consistency_ratio,
         }
+
+    def _phase_replay_loss(self, features):
+        if not self.enable_phase_replay or self.prev_phase_proto is None:
+            return torch.tensor(0.0, device=self.device)
+
+        feat = features[-1]
+        _, _, h, w = feat.shape
+        ref_feat = feat.mean(dim=0)
+        fft_ref = torch.fft.fft2(ref_feat, dim=(-2, -1))
+        amp_ref = torch.abs(fft_ref)
+        phase_ref = torch.angle(fft_ref)
+
+        losses = []
+        total_old = self.prev_phase_proto.shape[0]
+        if total_old == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        sample_num = min(total_old, self.phase_old_per_batch)
+        cls_indices = torch.randperm(total_old, device=self.device)[:sample_num]
+
+        for cls_idx in cls_indices:
+            proto_phase = self.prev_phase_proto[cls_idx]
+            amp_mean = None if self.prev_phase_amp_mean is None else self.prev_phase_amp_mean[cls_idx]
+
+            h_mid = proto_phase.shape[-2]
+            w_mid = proto_phase.shape[-1]
+            h0 = (h - h_mid) // 2
+            w0 = (w - w_mid) // 2
+
+            amp_syn = amp_ref.clone()
+            phase_syn = phase_ref.clone()
+
+            amp_syn[:, h0:h0 + h_mid, w0:w0 + w_mid] = amp_ref[:, h0:h0 + h_mid, w0:w0 + w_mid] if amp_mean is None else amp_mean
+            phase_syn[:, h0:h0 + h_mid, w0:w0 + w_mid] = proto_phase
+
+            g_syn = amp_syn * torch.exp(1j * phase_syn)
+            x_syn = torch.fft.ifft2(g_syn, dim=(-2, -1)).real.unsqueeze(0)
+
+            logits_syn = self.model.forward_class_prediction(x_syn)
+            pseudo_label = torch.full((1, h, w), int(cls_idx.item()) + 1, device=self.device, dtype=torch.long)
+
+            loss_cls = self.DistillBCELoss(logits_syn, pseudo_label).mean(dim=[0, 2, 3]).sum()
+            losses.append(loss_cls)
+
+        if not losses:
+            return torch.tensor(0.0, device=self.device)
+
+        return torch.stack(losses).mean()
 
     def _valid_epoch(self, epoch):
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -439,7 +498,6 @@ class Trainer_incremental(Trainer_base):
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
 
         # 旧类伪梯度/蒸馏相关配置
-        hp = self.config['hyperparameter']
         self.use_consistency_filter = hp.get('use_consistency_filter', False)
         self.consistency_old_thresh = hp.get('consistency_old_thresh', 0.0)
         self.consistency_curr_thresh = hp.get('consistency_curr_thresh', 0.0)
@@ -453,6 +511,14 @@ class Trainer_incremental(Trainer_base):
         self.prev_prototypes = prev_info['prototypes'].to(self.device)
         self.prev_norm = prev_info['norm_mean_and_std'].to(self.device)
         self.prev_noise = prev_info['noise'].to(self.device)
+
+        self.prev_phase_proto = prev_info.get('phase_proto', None)
+        self.prev_phase_amp_mean = prev_info.get('phase_amp_mean', None)
+        self.prev_phase_amp_std = prev_info.get('phase_amp_std', None)
+        if self.prev_phase_proto is not None:
+            self.prev_phase_proto = self.prev_phase_proto.to(self.device)
+            self.prev_phase_amp_mean = self.prev_phase_amp_mean.to(self.device)
+            self.prev_phase_amp_std = self.prev_phase_amp_std.to(self.device)
 
         self.current_numbers = self.numbers[1:].sum()
 
@@ -560,7 +626,8 @@ class Trainer_incremental(Trainer_base):
             loss_main = self.mbce_weight * loss_dict['loss_mbce'].sum()
             loss_old = distill_weight * loss_dict['loss_mbce_distill'].sum() \
                        + self.config['hyperparameter']['pkd'] * loss_dict['loss_pkd'].sum() \
-                       + self.config['hyperparameter']['cont'] * loss_dict['loss_cont']
+                       + self.config['hyperparameter']['cont'] * loss_dict['loss_cont'] \
+                       + self.phase_replay_weight * loss_dict['loss_phase_replay']
 
             opt_stepped = False
             if not self.use_separate_old_update:
@@ -581,7 +648,8 @@ class Trainer_incremental(Trainer_base):
                 loss_dict_old = self._forward_loss_pass(data)
                 loss_old_step = distill_weight * loss_dict_old['loss_mbce_distill'].sum() \
                                  + self.config['hyperparameter']['pkd'] * loss_dict_old['loss_pkd'].sum() \
-                                 + self.config['hyperparameter']['cont'] * loss_dict_old['loss_cont']
+                                 + self.config['hyperparameter']['cont'] * loss_dict_old['loss_cont'] \
+                                 + self.phase_replay_weight * loss_dict_old['loss_phase_replay']
 
                 if loss_old_step.requires_grad:
                     loss_old_scaled = self.pseudo_grad_scale * loss_old_step
@@ -602,6 +670,9 @@ class Trainer_incremental(Trainer_base):
                                       loss_dict['loss_mbce_distill'].sum().item() * distill_weight)
             self.train_metrics.update('loss_pkd', loss_dict['loss_pkd'].sum().item() * self.config['hyperparameter']['pkd'])
             self.train_metrics.update('loss_cont', loss_dict['loss_cont'].item() * self.config['hyperparameter']['cont'])
+            if self.phase_replay_weight > 0:
+                self.train_metrics.update('loss_phase_replay',
+                                          loss_dict['loss_phase_replay'].item() * self.phase_replay_weight)
             self.train_metrics.update('loss_old_step', loss_old.item() if torch.is_tensor(loss_old) else float(loss_old))
             self.train_metrics.update('consistency_ratio', loss_dict['consistency_ratio'].item())
 
