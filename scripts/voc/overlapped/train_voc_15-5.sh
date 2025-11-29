@@ -37,7 +37,7 @@ NAME='STAR'
 
 #-----------------------------------------------梯度学习器
 # 一致性过滤与分离式更新的可调开关
-#CONSISTENCY_ARGS="--use_consistency_filter --consistency_old_thresh 0.5 --consistency_curr_thresh 0.5"
+#CONSISTENCY_ARGS="--use_consistency_filter --consistency_old_thresh 0.7 --consistency_curr_thresh 0.6"
 #SEPARATE_UPDATE_ARGS="--use_separate_old_update --pseudo_grad_scale 1.0"
 #
 #python train_voc.py -c configs/config_voc.json \

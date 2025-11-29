@@ -459,9 +459,12 @@ class Trainer_incremental(Trainer_base):
         assert task_info['setting'] in ['overlap', 'disjoint']
 
         if task_info['setting'] == 'overlap':
-            self.prev_bg_number = self.prev_numbers[0] * (1 - 0.01 * self.n_new_classes)
+            prev_bg = self.prev_numbers[0] * (1 - 0.01 * self.n_new_classes)
         else:
-            self.prev_bg_number = self.prev_numbers[0]
+            prev_bg = self.prev_numbers[0]
+
+        # 为了降低每个 epoch 的背景回放量，这里统一缩减三分之一。
+        self.prev_bg_number = prev_bg * (2.0 / 3.0)
 
     def _print_train_info(self):
         self.logger.info(f"pos_weight - {self.config['hyperparameter']['pos_weight']}")
