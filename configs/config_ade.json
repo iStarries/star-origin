@@ -79,7 +79,12 @@
         "enable_mbce_distill": false,
         "distill_bg_only": false,
         "pkd": 5,
-        "cont": 0.05
+        "cont": 0.05,
+        "phase_replay": {
+            "enabled": false,
+            "mid_ratio": 0.5,
+            "phase_momentum": 0.01
+        }
     },
     "lr_scheduler": {
         "type": "WarmupPolyLR",

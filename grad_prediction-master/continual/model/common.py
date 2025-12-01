@@ -134,7 +134,7 @@ class AlexNet(nn.Module):
 
         self.last = nn.Linear(2048,num_classes)
         # self.last=nn.ModuleList()
-        # for t,n in self.taskcla:
+        # for train_voc.sh,n in self.taskcla:
         #     self.last.append(torch.nn.Linear(2048,n))
 
         # return
@@ -152,7 +152,7 @@ class AlexNet(nn.Module):
 
         y = self.last(h)
         # y=[]
-        # for t,i in self.taskcla:
-        #     y.append(self.last[t](h))
+        # for train_voc.sh,i in self.taskcla:
+        #     y.append(self.last[train_voc.sh](h))
 
         return y

@@ -67,6 +67,9 @@ class BaseTrainer:
         self.grad_learner = None
         self.grad_optimizer = None
 
+        # Phase prototype bank is attached by subclasses when enabled.
+        self.phase_bank = None
+
 
         # if config.resume is not None:
         #     self._resume_checkpoint(config.resume)
@@ -119,7 +122,7 @@ class BaseTrainer:
                         not_improved_count += 1
 
                     if (self.early_stop > 0) and (not_improved_count > self.early_stop):
-                        self.logger.info("Validation performance didn\'t improve for {} epochs. "
+                        self.logger.info("Validation performance didn\'train_voc.sh improve for {} epochs. "
                                          "Training stops.".format(self.early_stop))
                         break
 
@@ -140,7 +143,8 @@ class BaseTrainer:
             "numbers": self.numbers,
             "prototypes": self.prototypes,
             "norm_mean_and_std": self.norm_mean_and_std,
-            "noise": self.noise
+            "noise": self.noise,
+            "phase_bank": self.phase_bank.state_dict() if self.phase_bank is not None else None,
         }
 
         torch.save(all_info, save_file)

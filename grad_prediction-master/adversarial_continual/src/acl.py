@@ -554,5 +554,5 @@ class DiffLoss(torch.nn.Module):
         D2_norm=torch.norm(D2, p=2, dim=1, keepdim=True).detach()
         D2_norm=D2.div(D2_norm.expand_as(D2) + 1e-6)
 
-        # return torch.mean((D1_norm.mm(D2_norm.t()).pow(2)))
+        # return torch.mean((D1_norm.mm(D2_norm.train_voc.sh()).pow(2)))
         return torch.mean((D1_norm.mm(D2_norm.t()).pow(2)))

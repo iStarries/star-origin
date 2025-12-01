@@ -441,7 +441,7 @@ class MNIST_RGB(datasets.MNIST):
                                             self.test_file)))
 
     def download(self):
-        """Download the MNIST data if it doesn't exist in processed_folder already."""
+        """Download the MNIST data if it doesn'train_voc.sh exist in processed_folder already."""
 
         if self._check_exists():
             return
@@ -569,7 +569,7 @@ class notMNIST_(torch.utils.data.Dataset):
         return len(self.data)
 
     def download(self):
-        """Download the notMNIST data if it doesn't exist in processed_folder already."""
+        """Download the notMNIST data if it doesn'train_voc.sh exist in processed_folder already."""
 
         import errno
         root = os.path.expanduser(self.root)

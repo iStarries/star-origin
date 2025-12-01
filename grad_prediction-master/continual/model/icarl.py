@@ -69,7 +69,7 @@ class Net(torch.nn.Module):
         ns = x.size(0)
         if t * self.nc_per_task not in self.mem_class_x.keys():
             # no exemplar in memory yet, output uniform distr. over classes in
-            # task t above, we check presence of first class for this task, we
+            # task train_voc.sh above, we check presence of first class for this task, we
             # should check them all
             out = torch.Tensor(ns, self.n_classes).fill_(-10e10)
             out[:, int(t * self.nc_per_task): int((t + 1) * self.nc_per_task)].fill_(

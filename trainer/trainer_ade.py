@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.parallel
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from base import BaseTrainer
 from utils import MetricTracker, MetricTracker_scalars
 from models.loss import BCELoss, WBCELoss, PKDLoss, ContLoss
 from data_loader import ADE
+from utils.prototype_bank import PhasePrototypeBank
 
 class Trainer_base(BaseTrainer):
     """
@@ -91,6 +93,15 @@ class Trainer_base(BaseTrainer):
         self.mbce_weight = self.config['hyperparameter']['mbce']
         self.mbce_distill_weight = self.config['hyperparameter'].get('mbce_distill', self.mbce_weight)
 
+        phase_cfg = self.config['hyperparameter'].get('phase_replay', {})
+        self.phase_replay_enabled = phase_cfg.get('enabled', False)
+        if self.phase_replay_enabled:
+            self.phase_bank = PhasePrototypeBank(
+                mid_ratio=phase_cfg.get('mid_ratio', 0.5),
+                momentum=phase_cfg.get('phase_momentum', 0.01),
+                device=self.device,
+            )
+
         self._print_train_info()
 
         self.visulized_dir = visulized_dir
@@ -107,6 +118,24 @@ class Trainer_base(BaseTrainer):
                 f" (bg_only={self.distill_bg_only})")
         else:
             self.logger.info("          + 0 * L_mbce_distill (disabled)")
+
+    def _update_phase_bank_from_feature(self, feature, label):
+        if not self.phase_replay_enabled or self.phase_bank is None:
+            return
+
+        with torch.no_grad():
+            small_label = F.interpolate(
+                label.unsqueeze(1).float(), size=feature.shape[-2:], mode="nearest"
+            ).squeeze(1).long()
+
+            for cls_idx in torch.unique(small_label):
+                if cls_idx <= 0:
+                    continue
+                mask = (small_label == int(cls_idx)).float().unsqueeze(1)
+                if mask.sum() == 0:
+                    continue
+                masked_feature = feature * mask
+                self.phase_bank.update_from_masked_feature(masked_feature, int(cls_idx))
 
     def _train_epoch(self, epoch):
         """
@@ -134,7 +163,8 @@ class Trainer_base(BaseTrainer):
         for batch_idx, data in enumerate(self.train_loader):
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
             with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
-                logit, features, _ = self.model(data['image'], ret_intermediate=False)
+                ret_intermediate = self.phase_replay_enabled
+                logit, features, _ = self.model(data['image'], ret_intermediate=ret_intermediate)
 
                 loss_mbce = self.BCELoss(
                     logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
@@ -146,6 +176,9 @@ class Trainer_base(BaseTrainer):
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            if self.phase_replay_enabled:
+                self._update_phase_bank_from_feature(features[-1], data['label'])
 
             self.optimizer.zero_grad(set_to_none=True)
             
@@ -337,6 +370,20 @@ class Trainer_incremental(Trainer_base):
         self.prev_norm = prev_info['norm_mean_and_std'].to(self.device)
         self.prev_noise = prev_info['noise'].to(self.device)
 
+        phase_cfg = self.config['hyperparameter'].get('phase_replay', {})
+        self.phase_replay_enabled = phase_cfg.get('enabled', False)
+        if self.phase_replay_enabled:
+            self.phase_bank = PhasePrototypeBank(
+                mid_ratio=phase_cfg.get('mid_ratio', 0.5),
+                momentum=phase_cfg.get('phase_momentum', 0.01),
+                device=self.device,
+            )
+            prev_phase_state = prev_info.get('phase_bank', None)
+            if prev_phase_state is not None:
+                self.phase_bank.load_state_dict(prev_phase_state, map_location=self.device)
+        else:
+            self.phase_bank = None
+
         self.current_numbers = self.numbers[1:].sum()
         # self.per_iter_prev_number = (self.prev_numbers[1:] / len(self.train_loader)).to(torch.int)
 
@@ -462,6 +509,9 @@ class Trainer_incremental(Trainer_base):
                     self.model(data['image'], ret_intermediate=True, fake_features=fake_features, region_bg=region_bg)
                 logits_for_fake = extra[0]
                 logits_for_extra_bg = extra[1]
+
+                if self.phase_replay_enabled:
+                    self._update_phase_bank_from_feature(features[-1], data['label'])
 
                 # [|Ct|]
                 loss_mbce_ori = self.BCELoss(

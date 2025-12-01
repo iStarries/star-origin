@@ -86,7 +86,7 @@ def project2cone2(gradient, memories, margin=0.5):
         Overwrites "gradient" with the final projected update.
 
         input:  gradient, p-vector
-        input:  memories, (t * p)-vector
+        input:  memories, (train_voc.sh * p)-vector
         output: x, p-vector
     """
     memories_np = memories.cpu().t().double().numpy()

@@ -307,6 +307,11 @@ if __name__ == '__main__':
         CustomArgs(['--use_separate_old_update'], action='store_true', target='hyperparameter;use_separate_old_update'),
         CustomArgs(['--pseudo_grad_scale'], type=float, target='hyperparameter;pseudo_grad_scale'),
 
+        # Phase replay controls
+        CustomArgs(['--phase_replay'], action='store_true', target='hyperparameter;phase_replay;enabled'),
+        CustomArgs(['--phase_mid_ratio'], type=float, target='hyperparameter;phase_replay;mid_ratio'),
+        CustomArgs(['--phase_momentum'], type=float, target='hyperparameter;phase_replay;phase_momentum'),
+
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
 

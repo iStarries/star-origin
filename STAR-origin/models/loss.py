@@ -59,7 +59,7 @@ class WBCELoss(nn.Module):
     def __init__(self, ignore_index=255, pos_weight=None, reduction='none', n_old_classes=0, n_new_classes=0):
         super().__init__()
         self.ignore_index = ignore_index
-        self.n_old_classes = n_old_classes  # |C0:t-1| + 1(bg), 19-1: 20 | 15-5: 16 | 15-1: 16...
+        self.n_old_classes = n_old_classes  # |C0:train_voc.sh-1| + 1(bg), 19-1: 20 | 15-5: 16 | 15-1: 16...
         self.n_new_classes = n_new_classes  # |Ct|, 19-1: 1 | 15-5: 5 | 15-1: 1
         
         self.reduction = reduction
@@ -111,7 +111,7 @@ class ContLoss(nn.Module):
     def __init__(self, ignore_index=255, n_old_classes=0, n_new_classes=0):
         super().__init__()
         self.ignore_index = ignore_index
-        self.n_old_classes = n_old_classes  # |C0:t-1| + 1(bg), 19-1: 20 | 15-5: 16 | 15-1: 16...
+        self.n_old_classes = n_old_classes  # |C0:train_voc.sh-1| + 1(bg), 19-1: 20 | 15-5: 16 | 15-1: 16...
         self.n_new_classes = n_new_classes
 
         self.criteria = nn.MSELoss(reduction='mean')

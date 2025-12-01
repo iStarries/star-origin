@@ -29,13 +29,13 @@ def confusion_matrix(result_t, result_a, fname=None):
     #result = result_a.index((torch.LongTensor(changes),))
     result = result_a[(torch.LongTensor(changes),)]
 
-    # acc[t] equals result[t,t]
+    # acc[train_voc.sh] equals result[train_voc.sh,train_voc.sh]
     acc = result.diag()
     fin = result[nt - 1]
-    # bwt[t] equals result[T,t] - acc[t]
+    # bwt[train_voc.sh] equals result[T,train_voc.sh] - acc[train_voc.sh]
     bwt = result[nt - 1] - acc
 
-    # fwt[t] equals result[t-1,t] - baseline[t]
+    # fwt[train_voc.sh] equals result[train_voc.sh-1,train_voc.sh] - baseline[train_voc.sh]
     fwt = torch.zeros(nt)
     for t in range(1, nt):
         fwt[t] = result[t - 1, t] - baseline[t]

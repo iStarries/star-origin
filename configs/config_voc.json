@@ -84,7 +84,12 @@
         "consistency_old_thresh": 0.5,
         "consistency_curr_thresh": 0.5,
         "use_separate_old_update": false,
-        "pseudo_grad_scale": 1.0
+        "pseudo_grad_scale": 1.0,
+        "phase_replay": {
+            "enabled": false,
+            "mid_ratio": 0.5,
+            "phase_momentum": 0.01
+        }
     },
     "lr_scheduler": {
         "type": "PolyLR",

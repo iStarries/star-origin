@@ -96,37 +96,37 @@ NAME='STAR'
 #--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill \
 #--val_every 2 --info 'train1-enable_mbce_distill'
 ##
-python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
---task_name '15-1' --task_step 1 \
---bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
---val_every 10 \
---prev_best_checkpoint '/media/disk1/media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_0_ep60/checkpoint-epoch60-val_Mean_Intersection_over_Union_overall-80.3113.pth' \
---prev_prototypes_path '/media/disk1/media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_0_ep60/prototypes-epoch60.pth'
-
-python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
---task_name '15-1' --task_step 2 \
---bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
---val_every 10 \
-
-python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
---task_name '15-1' --task_step 3 \
---bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
---val_every 10 \
-
-python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
---task_name '15-1' --task_step 4 \
---bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
---val_every 10 \
-
-python train_voc.py -c configs/config_voc.json \
--d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
---task_name '15-1' --task_step 5 \
---bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
---val_every 10 \
+#python train_voc.py -c configs/config_voc.json \
+#-d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+#--task_name '15-1' --task_step 1 \
+#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
+#--val_every 10 \
+#--prev_best_checkpoint '/media/disk1/media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_0_ep60/checkpoint-epoch60-val_Mean_Intersection_over_Union_overall-80.3113.pth' \
+#--prev_prototypes_path '/media/disk1/media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_0_ep60/prototypes-epoch60.pth'
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+#--task_name '15-1' --task_step 2 \
+#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
+#--val_every 10 \
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+#--task_name '15-1' --task_step 3 \
+#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
+#--val_every 10 \
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+#--task_name '15-1' --task_step 4 \
+#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
+#--val_every 10 \
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d 0 --save_dir 'saved_voc' --name 'continue-distill-weighted_1' --task_setting ${TASKSETTING} --lr ${LR} --freeze_bn \
+#--task_name '15-1' --task_step 5 \
+#--bs 24 --mem_size 0 --epochs 60 --enable_mbce_distill --mbce_distill 1 \
+#--val_every 10 \
 
 #------------------------------------------------------软标签
 

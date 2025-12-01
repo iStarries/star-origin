@@ -95,11 +95,11 @@ class VOCSegmentationIncremental(BaseDataset):
                 cat = np.array(cat, dtype=np.uint8)
 
                 if (self.train or self.val):
-                    # Remove the sample if the g.t mask does not contain new class
+                    # Remove the sample if the g.train_voc.sh mask does not contain new class
                     if not lbl_contains_any(cat, self.classes_idx_new):
                         continue
                     # Unique set
-                    # : Remove the sample if the g.t mask contains any other labels that not appeared yet.
+                    # : Remove the sample if the g.train_voc.sh mask contains any other labels that not appeared yet.
                     if (self.train) and (self.setting == 'disjoint' or self.setting == 'sequential'):
                         if not lbl_contains_all(cat, list(set(self.classes_idx_old + self.classes_idx_new + [0, 255]))):
                             continue
@@ -280,11 +280,11 @@ class ADESegmentationIncremental(BaseDataset):
 
                 cat = np.array(Image.open(_cat), dtype=np.uint8)
                 if (self.train or self.val):
-                    # Remove the sample if the g.t mask does not contain new class
+                    # Remove the sample if the g.train_voc.sh mask does not contain new class
                     if not lbl_contains_any(cat, self.classes_idx_new):
                         continue
                     # Unique set
-                    # : Remove the sample if the g.t mask contains any other labels that not appeared yet.
+                    # : Remove the sample if the g.train_voc.sh mask contains any other labels that not appeared yet.
                     if (self.train) and (self.setting == 'disjoint' or self.setting == 'sequential'):
                         if not lbl_contains_all(cat, list(set(self.classes_idx_old + self.classes_idx_new + [0, 255]))):
                             continue
@@ -658,7 +658,7 @@ class ADESegmentationIncrementalMemory(BaseDataset):
 
         else:  # Train or Validation
             # Masking except current classes
-            # SSUL uses fully annotated mask, while we don't
+            # SSUL uses fully annotated mask, while we don'train_voc.sh
             if self.masking_value is None:
                 return target
             if self.setting in ['disjoint', 'overlap']:
