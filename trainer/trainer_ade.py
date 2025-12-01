@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.parallel
+from pathlib import Path
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from base import BaseTrainer
 from utils import MetricTracker, MetricTracker_scalars
-from models.loss import WBCELoss, PKDLoss, ContLoss
+from models.loss import BCELoss, WBCELoss, PKDLoss, ContLoss
 from data_loader import ADE
 
 class Trainer_base(BaseTrainer):
@@ -83,6 +84,12 @@ class Trainer_base(BaseTrainer):
             [len(self.task_info['new_class'])], device=self.device) * self.config['hyperparameter']['pos_weight']
         self.BCELoss = WBCELoss(
             pos_weight=pos_weight, n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
+        self.enable_mbce_distill = self.config['hyperparameter'].get('enable_mbce_distill', False)
+        self.distill_bg_only = self.config['hyperparameter'].get('distill_bg_only', False)
+        self.DistillBCELoss = BCELoss(reduction='none', distill_bg_only=self.distill_bg_only)
+
+        self.mbce_weight = self.config['hyperparameter']['mbce']
+        self.mbce_distill_weight = self.config['hyperparameter'].get('mbce_distill', self.mbce_weight)
 
         self._print_train_info()
 
@@ -93,7 +100,13 @@ class Trainer_base(BaseTrainer):
 
     def _print_train_info(self):
         self.logger.info(f"pos_weight - {self.config['hyperparameter']['pos_weight']}")
-        self.logger.info(f"Total loss = {self.config['hyperparameter']['mbce']} * L_mbce")
+        self.logger.info(f"Total loss = {self.mbce_weight} * L_mbce")
+        if self.enable_mbce_distill:
+            self.logger.info(
+                f"          + {self.mbce_distill_weight} * L_mbce_distill"
+                f" (bg_only={self.distill_bg_only})")
+        else:
+            self.logger.info("          + 0 * L_mbce_distill (disabled)")
 
     def _train_epoch(self, epoch):
         """
@@ -102,7 +115,8 @@ class Trainer_base(BaseTrainer):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -127,7 +141,7 @@ class Trainer_base(BaseTrainer):
                     data['label'],                # [N, H, W]
                 ).mean(dim=[0, 2, 3])  # [|Ct|]
 
-                loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum()
+                loss = self.mbce_weight * loss_mbce.sum()
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -165,7 +179,8 @@ class Trainer_base(BaseTrainer):
         return log, val_flag
 
     def _valid_epoch(self, epoch):
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
         
         log = {}
         self.evaluator_val.reset()
@@ -198,13 +213,13 @@ class Trainer_base(BaseTrainer):
                     self.valid_metrics.update(met.__name__, [met()['overall']], 'overall', n=1)
 
                 if 'old' in met().keys():
-                    log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
+                    log.update({met.__name__ + '_old': met()['old']})
                 if 'new' in met().keys():
-                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
+                    log.update({met.__name__ + '_new': met()['new']})
                 if 'harmonic' in met().keys():
-                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
+                    log.update({met.__name__ + '_harmonic': met()['harmonic']})
                 if 'overall' in met().keys():
-                    log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
+                    log.update({met.__name__ + '_overall': met()['overall']})
                 if 'by_class' in met().keys():
                     by_class_str = '\n'
                     for i in range(len(met()['by_class'])):
@@ -216,7 +231,8 @@ class Trainer_base(BaseTrainer):
         return log
 
     def _test(self, epoch=None):
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         log = {}
         self.evaluator_test.reset()
@@ -257,9 +273,9 @@ class Trainer_base(BaseTrainer):
                 if 'old' in met().keys():
                     log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
                 if 'new' in met().keys():
-                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
+                    log.update({met.__name__ + '_new': met()['new']})
                 if 'harmonic' in met().keys():
-                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
+                    log.update({met.__name__ + '_harmonic': met()['harmonic']})
                 if 'overall' in met().keys():
                     log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
                 if 'by_class' in met().keys():
@@ -299,7 +315,7 @@ class Trainer_incremental(Trainer_base):
                 self.model_old = nn.DataParallel(model_old, device_ids=self.device_ids)
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont',
+            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_bce_distill',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -307,15 +323,13 @@ class Trainer_incremental(Trainer_base):
 
         self.BCELoss_fake = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
         self.BCELoss_extra_bg = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
+        self.DistillBCELoss = BCELoss(reduction='none')
         self.PKDLoss = PKDLoss()
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
 
         # self.pred_numbers = self.compute_pred_number()
 
-        prev_info_path = \
-            str(config.save_dir)[:-1] + \
-            str(config['data_loader']['args']['task']['step'] - 1) + \
-            "/prototypes-epoch{}.pth".format(config['trainer']['epochs'])
+        prev_info_path = self._resolve_prev_info_path(config)
 
         prev_info = torch.load(prev_info_path)
         self.prev_numbers = prev_info['numbers'].to(self.device)
@@ -333,6 +347,17 @@ class Trainer_incremental(Trainer_base):
         else:
             self.prev_bg_number = self.prev_numbers[0]
 
+    def _resolve_prev_info_path(self, config):
+        prev_step = config['data_loader']['args']['task']['step'] - 1
+        prev_dir_candidates = sorted(Path(config.save_dir).parent.glob(f"step_{prev_step}_*"))
+
+        if prev_dir_candidates:
+            prev_dir = prev_dir_candidates[-1]
+        else:
+            prev_dir = Path(config.save_dir).parent / f"step_{prev_step}"
+
+        return prev_dir / f"prototypes-epoch{config['trainer']['epochs']}.pth"
+
         # self.prev_numbers = self.prev_numbers[1:]
 
     def _print_train_info(self):
@@ -347,7 +372,8 @@ class Trainer_incremental(Trainer_base):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        torch.distributed.barrier()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -464,12 +490,23 @@ class Trainer_incremental(Trainer_base):
                 loss_mbce = loss_mbce_ori + loss_mbce_fake * weight_fake + loss_mbce_extra_bg * weight_extra_bg
                 loss_mbce = loss_mbce / (1 + weight_extra_bg + weight_fake)
 
+                # Distillation on logits: can be toggled off or restricted to
+                # background pixels based on config.
+                if self.enable_mbce_distill and logit_old is not None:
+                    loss_mbce_distill = self.DistillBCELoss(
+                        logit, data['label'], logit_old).mean(dim=[0, 2, 3])
+                else:
+                    loss_mbce_distill = torch.zeros_like(loss_mbce)
+
                 loss_pkd = self.PKDLoss(features, features_old, pseudo_label_region.to(torch.float32))
 
                 loss_cont = self.ContLoss(
                     features[-1], logit[:, -self.n_new_classes:], data['label'], self.prev_prototypes)
 
-                loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum() \
+                distill_weight = self.mbce_distill_weight if self.enable_mbce_distill else 0
+
+                loss = self.mbce_weight * loss_mbce.sum() \
+                       + distill_weight * loss_mbce_distill.sum() \
                        + self.config['hyperparameter']['pkd'] * loss_pkd.sum() \
                        + self.config['hyperparameter']['cont'] * loss_cont
 
@@ -479,7 +516,9 @@ class Trainer_incremental(Trainer_base):
 
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
             self.train_metrics.update('loss', loss.item())
-            self.train_metrics.update('loss_mbce', loss_mbce.sum().item() * self.config['hyperparameter']['mbce'])
+            self.train_metrics.update('loss_mbce', loss_mbce.sum().item() * self.mbce_weight)
+            self.train_metrics.update('loss_bce_distill',
+                                      loss_mbce_distill.sum().item() * distill_weight)
             self.train_metrics.update('loss_pkd', loss_pkd.sum().item() * self.config['hyperparameter']['pkd'])
             self.train_metrics.update('loss_cont', loss_cont.item() * self.config['hyperparameter']['cont'])
 

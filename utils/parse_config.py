@@ -21,6 +21,7 @@ class ConfigParser:
         """
         # load config file and apply modification
         self._config = _update_config(config, modification)
+        self._config.setdefault('info', '')
         self.resume = resume
         self.run_id = run_id
 
@@ -33,11 +34,12 @@ class ConfigParser:
             + self.config['name']
 
         if self.run_id is None:  # use timestamp as default run-id
-            # run_id = datetime.now().strftime(r'%m%d_%H%M%S')
-            self.run_id = f"step_{self.config['data_loader']['args']['task']['step']}"
+            time_tag = datetime.now().strftime(r'%Y%m%d-%H%M%S')
+            self.run_id = f"step_{self.config['data_loader']['args']['task']['step']}_{time_tag}"
 
+        # 将日志与权重保存在同一目录，便于统一管理
         self._save_dir = save_dir / 'models' / exper_name / self.run_id
-        self._log_dir = save_dir / 'log' / exper_name / self.run_id
+        self._log_dir = self._save_dir
 
         # make directory for saving checkpoints and log.
         # exist_ok = self.run_id == ''
@@ -50,22 +52,12 @@ class ConfigParser:
             if self.config['test'] is True:
                 run_id = datetime.now().strftime(r'%m%d_%H%M%S')
                 self._save_dir = save_dir / 'models' / exper_name / f'test_{run_id}'
+                self._log_dir = self._save_dir
                 self.save_dir.mkdir(parents=True, exist_ok=exist_ok)
                 pass
             else:
                 raise FileExistsError
-        try:
-            if self.config['test'] is True:
-                raise FileExistsError
-            self.log_dir.mkdir(parents=True, exist_ok=exist_ok)
-        except FileExistsError:
-            if self.config['test'] is True:
-                run_id = datetime.now().strftime(r'%m%d_%H%M%S')
-                self._log_dir = save_dir / 'log' / exper_name / f'test_{run_id}'
-                self.log_dir.mkdir(parents=True, exist_ok=exist_ok)
-                pass
-            else:
-                raise FileExistsError
+        # 日志目录与保存目录一致，因此无需额外创建单独的日志路径
 
         # save updated config file to the checkpoint dir
         write_json(self.config, self.save_dir / 'config.json')

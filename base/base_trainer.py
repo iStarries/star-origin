@@ -1,12 +1,14 @@
 import os.path
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 from abc import abstractmethod
 from numpy import inf
 from logger import TensorboardWriter
+from pathlib import Path
 
 
 
@@ -24,7 +26,10 @@ class BaseTrainer:
         self.validation_period = cfg_trainer['validation_period'] if cfg_trainer['validation_period'] == -1 else cfg_trainer['validation_period']
         self.monitor = cfg_trainer.get('monitor', 'off')
         self.reset_best_mnt = cfg_trainer['reset_best_mnt']
-        self.rank = torch.distributed.get_rank()
+        if dist.is_available() and dist.is_initialized():
+            self.rank = dist.get_rank()
+        else:
+            self.rank = 0
 
         if logger is None:
             self.logger = config.get_logger('trainer', cfg_trainer['verbosity'])
@@ -57,6 +62,10 @@ class BaseTrainer:
         self.start_epoch = 1
 
         self.checkpoint_dir = config.save_dir
+
+        # 梯度学习器（若存在）的状态与优化器，会在保存/恢复时一并处理
+        self.grad_learner = None
+        self.grad_optimizer = None
 
 
         # if config.resume is not None:
@@ -105,7 +114,7 @@ class BaseTrainer:
                         self.mnt_best = log[self.mnt_metric]
                         not_improved_count = 0
                         self._save_best_model(epoch)
-                        
+
                     else:
                         not_improved_count += 1
 
@@ -312,6 +321,33 @@ class BaseTrainer:
         list_ids = list(range(n_gpu_use))
         return device, list_ids
 
+    def _load_model_state(self, state_dict):
+        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            self.model.module.load_state_dict(state_dict)
+        else:
+            self.model.load_state_dict(state_dict)
+
+    def _maybe_get_grad_learner_state(self):
+        if self.grad_learner is None:
+            return None
+        if isinstance(self.grad_learner, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            return self.grad_learner.module.state_dict()
+        return self.grad_learner.state_dict()
+
+    def _maybe_get_grad_optimizer_state(self):
+        if self.grad_optimizer is None:
+            return None
+        return self.grad_optimizer.state_dict()
+
+    def _load_grad_learner_state(self, state_dict):
+        if self.grad_learner is None:
+            self.logger.warning("检查点包含梯度学习器状态，但当前 Trainer 未初始化梯度学习器，已跳过加载。")
+            return
+        if isinstance(self.grad_learner, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            self.grad_learner.module.load_state_dict(state_dict)
+        else:
+            self.grad_learner.load_state_dict(state_dict)
+
     def _save_checkpoint(self, epoch):
         """
         Saving checkpoints
@@ -329,6 +365,8 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
         else:
             state = {
@@ -339,6 +377,8 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
         filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
         torch.save(state, filename)
@@ -361,6 +401,8 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
                 # 'config': self.config
             }
         else:
@@ -372,6 +414,8 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
                 # 'config': self.config
             }
         best_path = str(self.checkpoint_dir / 'model_best.pth')
@@ -397,11 +441,20 @@ class BaseTrainer:
         else:
             self.model.load_state_dict(checkpoint['state_dict'])
 
+        grad_state = checkpoint.get('grad_learner', None)
+        if grad_state is not None:
+            self._load_grad_learner_state(grad_state)
+
         if test is False:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             self.scaler.load_state_dict(checkpoint['scaler'])
-        
+
+            if self.grad_optimizer is not None and 'grad_optimizer' in checkpoint:
+                self.grad_optimizer.load_state_dict(checkpoint['grad_optimizer'])
+            elif self.grad_optimizer is not None and grad_state is not None:
+                self.logger.warning("检查点包含梯度学习器，但缺少其优化器状态，已跳过 grad_optimizer 加载。")
+
         self.logger.info("Checkpoint loaded. Resume training from epoch {}".format(self.start_epoch))
 
 def label_to_one_hot(label, logit, n_old_classes, ignore_index=255):

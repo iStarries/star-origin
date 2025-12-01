@@ -55,6 +55,9 @@ class VOCSegmentationIncremental(BaseDataset):
         self.im_ids = []
         self.categories = []
 
+        # 若未初始化分布式环境，默认为单进程 rank 0，避免 get_rank 触发错误
+        rank = distributed.get_rank() if distributed.is_initialized() else 0
+
         if (idxs_path is not None) and (os.path.exists(idxs_path)):
             self.im_ids = np.load(idxs_path).tolist()
             for x in self.im_ids:
@@ -71,12 +74,12 @@ class VOCSegmentationIncremental(BaseDataset):
                 self.images.append(_image)
                 self.categories.append(_cat)
         else:
-            if distributed.get_rank() == 0:
+            if rank == 0:
                 print("Filtering images....")
 
             lines = (_splits_dir / f"{self.split}.txt").read_text().splitlines()
             for ii, line in enumerate(lines):
-                if (ii % 1000 == 0) and (distributed.get_rank() == 0):
+                if (ii % 1000 == 0) and (rank == 0):
                     print(f"[{ii} / {len(lines)}]")
                     
                 if 'aug' not in self.split:
@@ -108,7 +111,7 @@ class VOCSegmentationIncremental(BaseDataset):
                 self.images.append(_image)
                 self.categories.append(_cat)
 
-            if (idxs_path is not None) and (distributed.get_rank() == 0):
+            if (idxs_path is not None) and (rank == 0):
                 np.save(idxs_path, np.array(self.im_ids))
 
         assert len(self.images) == len(self.categories)
@@ -250,6 +253,9 @@ class ADESegmentationIncremental(BaseDataset):
         
         fnames = sorted(os.listdir(self._image_dir))
 
+        # 若未初始化分布式环境，默认为单进程 rank 0，避免 get_rank 触发错误
+        rank = distributed.get_rank() if distributed.is_initialized() else 0
+
         self.im_ids = []
         self.categories = []
         if idxs_path is not None and os.path.exists(idxs_path):
@@ -263,7 +269,7 @@ class ADESegmentationIncremental(BaseDataset):
                 self.images.append(_image)
                 self.categories.append(_cat)
         else:
-            if distributed.get_rank() == 0:
+            if rank == 0:
                 print("Filtering images....")
 
             for ii, x in enumerate(fnames):
@@ -286,14 +292,14 @@ class ADESegmentationIncremental(BaseDataset):
                     if not lbl_contains_any(cat, list(set(self.classes_idx_old + self.classes_idx_new))):
                         continue
                 
-                if (ii % 1000 == 0) and (distributed.get_rank() == 0):
+                if (ii % 1000 == 0) and (rank == 0):
                     print(f"[{ii} / {len(fnames)}]")
 
                 self.im_ids.append(x[:-4])
                 self.images.append(_image)
                 self.categories.append(_cat)
 
-            if idxs_path is not None and distributed.get_rank() == 0:
+            if idxs_path is not None and rank == 0:
                 np.save(idxs_path, np.array(self.im_ids))
         
         assert len(self.images) == len(self.categories)
