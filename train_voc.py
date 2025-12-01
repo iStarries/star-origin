@@ -287,6 +287,7 @@ if __name__ == '__main__':
         CustomArgs(['--seed'], type=int, target='seed'),
         CustomArgs(['--ep', '--epochs'], type=int, target='trainer;epochs'),
         CustomArgs(['--val_period', '--val_every'], type=int, target='trainer;validation_period'),
+        CustomArgs(['--validate'], action='store_true', target='trainer;validate_on_test'),
         CustomArgs(['--lr', '--learning_rate'], type=float, target='optimizer;args;lr'),
         CustomArgs(['--bs', '--batch_size'], type=int, target='data_loader;args;train;batch_size'),
 

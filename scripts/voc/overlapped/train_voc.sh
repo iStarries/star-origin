@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# bash /media/wyh/star/scripts/voc/overlapped/train_voc_15-1.sh
-#2x   bash /media/disk1/media/wyh/star/scripts/voc/overlapped/train_voc_15-1.sh
+# bash /media/wyh/star/scripts/voc/overlapped/train_voc.sh
+#2x   bash /media/disk1/media/wyh/star/scripts/voc/overlapped/train_voc.sh
 
 GPU=0
 BS=24
@@ -28,46 +28,46 @@ python train_voc.py -c configs/config_voc.json \
 -d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
 
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
-
-#---------------------------------------------------------------------------------------------------------------
-
-NAME='ep20-grad'
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS} --epoch 20
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
-
-python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
---task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
-
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --epoch 20 --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+##---------------------------------------------------------------------------------------------------------------
+#
+#NAME='ep20-grad'
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS} --epoch 20
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+#python train_voc.py -c configs/config_voc.json \
+#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
+#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --epoch 20 ${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS} --freeze_bn --mem_size ${MEMORY_SIZE}
+#

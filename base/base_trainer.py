@@ -24,6 +24,11 @@ class BaseTrainer:
         self.save_period = cfg_trainer['epochs'] if cfg_trainer['save_period'] == -1 else cfg_trainer['save_period']
         # self.save_period = 1
         self.validation_period = cfg_trainer['validation_period'] if cfg_trainer['validation_period'] == -1 else cfg_trainer['validation_period']
+        self.validate_on_test = cfg_trainer.get('validate_on_test', False)
+        self.validate_tail_epochs = cfg_trainer.get('validate_tail_epochs', 15)
+        self.best_test_miou = -inf
+        self.best_test_checkpoint_path = None
+        self.do_test = False
         self.monitor = cfg_trainer.get('monitor', 'off')
         self.reset_best_mnt = cfg_trainer['reset_best_mnt']
         if dist.is_available() and dist.is_initialized():
@@ -99,6 +104,27 @@ class BaseTrainer:
             # print logged informations to the screen
             for key, value in log.items():
                 self.logger.info('    {:15s}: {}'.format(str(key), value))
+
+            # 在最后若干个 epoch 内按需运行测试集评估，并根据测试集 mIoU 保留最佳权重
+            if self.validate_on_test and self.do_test and (epoch > self.epochs - self.validate_tail_epochs):
+                test_log, raw_test_metrics = self._test(epoch=epoch, return_metrics=True)
+                if self.rank == 0:
+                    self.logger.info(f"Test evaluation at epoch {epoch} (validate mode)")
+                    for t_key, t_val in test_log.items():
+                        self.logger.info('    {:15s}: {}'.format(str(t_key), t_val))
+
+                    miou_result = raw_test_metrics.get('Mean_Intersection_over_Union', {})
+                    miou_overall = None
+                    if isinstance(miou_result, dict) and ('overall' in miou_result):
+                        miou_overall = float(miou_result['overall'])
+
+                    if miou_overall is not None and miou_overall > self.best_test_miou:
+                        if self.best_test_checkpoint_path is not None and self.best_test_checkpoint_path.exists():
+                            self.best_test_checkpoint_path.unlink()
+
+                        checkpoint_path = self._save_test_best_model(epoch, miou_overall)
+                        self.best_test_checkpoint_path = checkpoint_path
+                        self.best_test_miou = miou_overall
 
             # evaluate model performance according to configured metric, save best checkpoint as model_best
             if self.rank == 0:
@@ -425,6 +451,40 @@ class BaseTrainer:
         best_path = str(self.checkpoint_dir / 'model_best.pth')
         torch.save(state, best_path)
         self.logger.info("Saving current best: model_best.pth ...")
+
+    def _save_test_best_model(self, epoch, miou):
+        """专门用于测试集验证阶段的最佳权重保存，文件名包含 epoch 与 mIoU。"""
+
+        arch = type(self.model).__name__
+        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            state = {
+                'arch': arch,
+                'epoch': epoch,
+                'state_dict': self.model.module.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+                'lr_scheduler': self.lr_scheduler.state_dict(),
+                "scaler": self.scaler.state_dict(),
+                'monitor_best': miou,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
+            }
+        else:
+            state = {
+                'arch': arch,
+                'epoch': epoch,
+                'state_dict': self.model.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+                'lr_scheduler': self.lr_scheduler.state_dict(),
+                "scaler": self.scaler.state_dict(),
+                'monitor_best': miou,
+                'grad_learner': self._maybe_get_grad_learner_state(),
+                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
+            }
+
+        filename = self.checkpoint_dir / f"best-test-epoch{epoch}-miou{miou:.2f}.pth"
+        torch.save(state, str(filename))
+        self.logger.info(f"Saving current test-best: {filename.name} ...")
+        return filename
 
     def _resume_checkpoint(self, resume_path, test=False):
         """
