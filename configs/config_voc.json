@@ -2,7 +2,7 @@
     "name": "STAR",
     
     "n_gpu": 1,
-    "multiprocessing_distributed": true,
+    "multiprocessing_distributed": false,
     "rank": 0,
     "world_size": 1,
     "dist_backend": "nccl",
@@ -103,9 +103,9 @@
         "epochs": 60,
         "save_dir": "saved_voc/",
         "save_period": -1,
-        "validation_period": 2,
+        "validation_period": 10,
         "verbosity": 2,
-        "monitor": "max val_Mean_Intersection_over_Union_overall",
+        "monitor": "off",
         "early_stop": -1,
         "reset_best_mnt": false,
         "tensorboard": false

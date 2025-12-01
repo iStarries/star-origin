@@ -133,6 +133,7 @@ class Trainer_base(BaseTrainer):
         
         for batch_idx, data in enumerate(self.train_loader):
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
+            opt_stepped = False
             with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
                 logit, features, _ = self.model(data['image'], ret_intermediate=False)
 
@@ -145,6 +146,7 @@ class Trainer_base(BaseTrainer):
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
+            opt_stepped = True
             self.scaler.update()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -157,6 +159,9 @@ class Trainer_base(BaseTrainer):
             if batch_idx == 0:
                 self.writer.add_scalars('lr', {'lr': self.optimizer.param_groups[0]['lr']}, epoch - 1)
                 self.logger.info(f"lr[0]: {self.optimizer.param_groups[0]['lr']:.6f} / lr[1]: {self.optimizer.param_groups[1]['lr']:.6f} / lr[2]: {self.optimizer.param_groups[2]['lr']:.6f}")
+
+            if self.lr_scheduler is not None and opt_stepped:
+                self.lr_scheduler.step()
 
             self.progress(self.logger, batch_idx, len(self.train_loader))
 
@@ -563,14 +568,14 @@ class Trainer_incremental(Trainer_base):
             if not self.use_separate_old_update:
                 loss = loss_main + loss_old
                 self.scaler.scale(loss).backward()
-                step_result = self.scaler.step(self.optimizer)
-                opt_stepped = opt_stepped or (step_result is not None)
+                self.scaler.step(self.optimizer)
+                opt_stepped = True
                 self.scaler.update()
             else:
                 # 主监督更新
                 self.scaler.scale(loss_main).backward()
-                step_result = self.scaler.step(self.optimizer)
-                opt_stepped = opt_stepped or (step_result is not None)
+                self.scaler.step(self.optimizer)
+                opt_stepped = True
                 self.scaler.update()
 
                 # 独立的旧类伪梯度/蒸馏更新
@@ -583,8 +588,8 @@ class Trainer_incremental(Trainer_base):
                 if loss_old_step.requires_grad:
                     loss_old_scaled = self.pseudo_grad_scale * loss_old_step
                     self.scaler.scale(loss_old_scaled).backward()
-                    step_result_old = self.scaler.step(self.optimizer)
-                    opt_stepped = opt_stepped or (step_result_old is not None)
+                    self.scaler.step(self.optimizer)
+                    opt_stepped = True
                     self.scaler.update()
                 loss_old = loss_old_step
 
