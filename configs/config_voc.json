@@ -89,6 +89,18 @@
             "enabled": false,
             "mid_ratio": 0.5,
             "phase_momentum": 0.01
+        },
+        "grad_learner": {
+            "enabled": false,
+            "hidden_dim": 64,
+            "num_layers": 2,
+            "sample_pixels": 512,
+            "alpha": 0.5,
+            "eta": 1.0,
+            "lambda_fit": 1.0,
+            "epsilon": 1e-6,
+            "warmup_epochs": 0,
+            "lr": 0.001
         }
     },
     "lr_scheduler": {

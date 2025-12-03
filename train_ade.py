@@ -249,6 +249,18 @@ if __name__ == '__main__':
         CustomArgs(['--enable_mbce_distill'], action='store_true', target='hyperparameter;enable_mbce_distill'),
         CustomArgs(['--distill_bg_only'], action='store_true', target='hyperparameter;distill_bg_only'),
 
+        # Gradient learner toggles
+        CustomArgs(['--grad'], action='store_true', target='hyperparameter;grad_learner;enabled'),
+        CustomArgs(['--grad_hidden'], type=int, target='hyperparameter;grad_learner;hidden_dim'),
+        CustomArgs(['--grad_layers'], type=int, target='hyperparameter;grad_learner;num_layers'),
+        CustomArgs(['--grad_samples'], type=int, target='hyperparameter;grad_learner;sample_pixels'),
+        CustomArgs(['--grad_alpha'], type=float, target='hyperparameter;grad_learner;alpha'),
+        CustomArgs(['--grad_eta'], type=float, target='hyperparameter;grad_learner;eta'),
+        CustomArgs(['--grad_lambda'], type=float, target='hyperparameter;grad_learner;lambda_fit'),
+        CustomArgs(['--grad_eps'], type=float, target='hyperparameter;grad_learner;epsilon'),
+        CustomArgs(['--grad_warmup'], type=int, target='hyperparameter;grad_learner;warmup_epochs'),
+        CustomArgs(['--grad_lr'], type=float, target='hyperparameter;grad_learner;lr'),
+
         # Phase replay controls
         CustomArgs(['--phase_replay'], action='store_true', target='hyperparameter;phase_replay;enabled'),
         CustomArgs(['--phase_mid_ratio'], type=float, target='hyperparameter;phase_replay;mid_ratio'),

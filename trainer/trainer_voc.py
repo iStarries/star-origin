@@ -8,6 +8,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from base import BaseTrainer
 from utils import MetricTracker, MetricTracker_scalars
 from models.loss import BCELoss, WBCELoss, PKDLoss, ContLoss
+from models.gradient_learner import GradientLearner
 from data_loader import VOC
 from utils.prototype_bank import PhasePrototypeBank
 
@@ -66,13 +67,44 @@ class Trainer_base(BaseTrainer):
         # For automatic mixed precision(AMP)
         self.scaler = torch.cuda.amp.GradScaler(enabled=config['use_amp'])
 
+        self.grad_cfg = self.config['hyperparameter'].get('grad_learner', {})
+        self.grad_enabled = self.grad_cfg.get('enabled', False)
+        self.grad_warmup = self.grad_cfg.get('warmup_epochs', 0)
+        self.grad_lambda = self.grad_cfg.get('lambda_fit', 1.0)
+        self.grad_alpha = self.grad_cfg.get('alpha', 0.5)
+        self.grad_eta = self.grad_cfg.get('eta', 1.0)
+        self.grad_epsilon = self.grad_cfg.get('epsilon', 1e-6)
+        self.grad_sample_pixels = self.grad_cfg.get('sample_pixels', 256)
+
+        if self.grad_enabled:
+            grad_input_dim = self.model.module.tot_classes if isinstance(self.model, (nn.DataParallel, DDP)) else self.model.tot_classes
+            grad_hidden = self.grad_cfg.get('hidden_dim', 64)
+            grad_layers = self.grad_cfg.get('num_layers', 2)
+
+            grad_net = GradientLearner(grad_input_dim, hidden_dim=grad_hidden, num_layers=grad_layers)
+            grad_net = grad_net.to(self.device)
+
+            if self.config['multiprocessing_distributed']:
+                if gpu is not None:
+                    self.grad_learner = DDP(grad_net, device_ids=[gpu])
+                else:
+                    self.grad_learner = DDP(grad_net)
+            else:
+                self.grad_learner = nn.DataParallel(grad_net, device_ids=self.device_ids)
+
+            grad_lr = self.grad_cfg.get('lr', self.config['optimizer']['args']['lr'])
+            self.grad_optimizer = torch.optim.Adam(self.grad_learner.parameters(), lr=grad_lr)
+        else:
+            self.grad_learner = None
+            self.grad_optimizer = None
+
         if self.evaluator_val is not None:
             self.metric_ftns_val = [getattr(self.evaluator_val, met) for met in config['metrics']]
         if self.evaluator_test is not None:
             self.metric_ftns_test = [getattr(self.evaluator_test, met) for met in config['metrics']]
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce',
+            'loss', 'loss_mbce', 'loss_grad',
             writer=self.writer,
             colums=['total', 'counts', 'average'],
         )
@@ -119,6 +151,13 @@ class Trainer_base(BaseTrainer):
                 f" (bg_only={self.distill_bg_only})")
         else:
             self.logger.info("          + 0 * L_mbce_distill (disabled)")
+        if self.grad_enabled:
+            self.logger.info(
+                f"Gradient learner enabled: hidden_dim={self.grad_cfg.get('hidden_dim', 64)}, "
+                f"sample_pixels={self.grad_sample_pixels}, alpha={self.grad_alpha}, "
+                f"eta={self.grad_eta}, lambda_fit={self.grad_lambda}, warmup={self.grad_warmup}")
+        else:
+            self.logger.info("Gradient learner disabled")
 
     def _update_phase_bank_from_feature(self, feature, label):
         if not self.phase_replay_enabled or self.phase_bank is None:
@@ -137,6 +176,47 @@ class Trainer_base(BaseTrainer):
                     continue
                 masked_feature = feature * mask
                 self.phase_bank.update_from_masked_feature(masked_feature, int(cls_idx))
+
+    def _train_gradient_learner(self, logit, label):
+        """Train gradient learner on trusted foreground pixels only."""
+        if self.grad_learner is None or self.grad_optimizer is None:
+            return None
+
+        with torch.no_grad():
+            mask_fg = (label != 0) & (label != 255)
+            flat_mask = mask_fg.view(-1)
+            valid_indices = flat_mask.nonzero(as_tuple=False).squeeze(1)
+
+        if valid_indices.numel() == 0:
+            return None
+
+        sample_num = min(self.grad_sample_pixels, valid_indices.numel())
+        perm = torch.randperm(valid_indices.numel(), device=valid_indices.device)[:sample_num]
+        chosen = valid_indices[perm]
+
+        logit_flat = logit.permute(0, 2, 3, 1).reshape(-1, logit.shape[1])
+        label_flat = label.view(-1)
+
+        z_fg = logit_flat[chosen].detach().requires_grad_(True)
+        y_fg = label_flat[chosen] - 1  # shift to zero-based class index
+
+        fg_loss = F.cross_entropy(z_fg, y_fg, reduction='mean')
+        g_true = torch.autograd.grad(fg_loss, z_fg, retain_graph=False)[0]
+
+        tau = g_true.norm(p=2, dim=1, keepdim=True)
+
+        pred_grad = self.grad_learner(z_fg.detach())
+        pred_norm = pred_grad.norm(p=2, dim=1, keepdim=True)
+        scaled_grad = self.grad_alpha * tau * pred_grad / (pred_norm + self.grad_epsilon)
+
+        z_prime = z_fg.detach() - self.grad_eta * scaled_grad
+        fit_loss = self.grad_lambda * F.cross_entropy(z_prime, y_fg, reduction='mean')
+
+        self.grad_optimizer.zero_grad(set_to_none=True)
+        fit_loss.backward()
+        self.grad_optimizer.step()
+
+        return fit_loss.item()
 
     def _train_epoch(self, epoch):
         """
@@ -184,10 +264,17 @@ class Trainer_base(BaseTrainer):
                 self._update_phase_bank_from_feature(features[-1], data['label'])
 
             self.optimizer.zero_grad(set_to_none=True)
-            
+
+            if self.grad_enabled and (epoch > self.grad_warmup):
+                grad_loss = self._train_gradient_learner(logit.detach(), data['label'])
+            else:
+                grad_loss = None
+
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
             self.train_metrics.update('loss', loss.item())
             self.train_metrics.update('loss_mbce', loss_mbce.sum().item())
+            if grad_loss is not None:
+                self.train_metrics.update('loss_grad', grad_loss)
 
             # Get First lr
             if batch_idx == 0:
@@ -214,7 +301,7 @@ class Trainer_base(BaseTrainer):
 
         return log, val_flag
 
-    def _forward_loss_pass(self, data, update_phase_bank=False):
+    def _forward_loss_pass(self, data, update_phase_bank=False, return_logit=False):
         """执行一次前向并计算增量学习各项损失。"""
         with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
             if self.model_old is not None:
@@ -323,13 +410,17 @@ class Trainer_base(BaseTrainer):
         if update_phase_bank:
             self._update_phase_bank_from_feature(features[-1], data['label'])
 
-        return {
+        loss_dict = {
             'loss_mbce': loss_mbce,
             'loss_mbce_distill': loss_mbce_distill,
             'loss_pkd': loss_pkd,
             'loss_cont': loss_cont,
             'consistency_ratio': consistency_ratio,
         }
+
+        if return_logit:
+            return loss_dict, logit.detach()
+        return loss_dict
 
     def _valid_epoch(self, epoch):
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -475,7 +566,7 @@ class Trainer_incremental(Trainer_base):
 
         self.train_metrics = MetricTracker(
             'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_bce_distill',
-            'loss_old_step', 'consistency_ratio',
+            'loss_old_step', 'consistency_ratio', 'loss_grad',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -614,7 +705,13 @@ class Trainer_incremental(Trainer_base):
             self.optimizer.zero_grad(set_to_none=True)
 
             # 第一步：主监督损失
-            loss_dict = self._forward_loss_pass(data, update_phase_bank=self.phase_replay_enabled)
+            return_logit = self.grad_enabled and (epoch > self.grad_warmup)
+            loss_out = self._forward_loss_pass(
+                data, update_phase_bank=self.phase_replay_enabled, return_logit=return_logit)
+            if return_logit:
+                loss_dict, grad_logit = loss_out
+            else:
+                loss_dict, grad_logit = loss_out, None
 
             distill_weight = self.mbce_distill_weight if self.enable_mbce_distill else 0
             loss_main = self.mbce_weight * loss_dict['loss_mbce'].sum()
@@ -638,7 +735,8 @@ class Trainer_incremental(Trainer_base):
 
                 # 独立的旧类伪梯度/蒸馏更新
                 self.optimizer.zero_grad(set_to_none=True)
-                loss_dict_old = self._forward_loss_pass(data, update_phase_bank=False)
+                loss_dict_old = self._forward_loss_pass(
+                    data, update_phase_bank=False, return_logit=False)
                 loss_old_step = distill_weight * loss_dict_old['loss_mbce_distill'].sum() \
                                  + self.config['hyperparameter']['pkd'] * loss_dict_old['loss_pkd'].sum() \
                                  + self.config['hyperparameter']['cont'] * loss_dict_old['loss_cont']
@@ -650,6 +748,10 @@ class Trainer_incremental(Trainer_base):
                     opt_stepped = True
                     self.scaler.update()
                 loss_old = loss_old_step
+
+            grad_loss = None
+            if self.grad_enabled and (epoch > self.grad_warmup) and (grad_logit is not None):
+                grad_loss = self._train_gradient_learner(grad_logit, data['label'])
 
             # 统一的 lr_scheduler 步进（仅在本轮确实执行了 optimizer.step 时）
             if self.lr_scheduler is not None and opt_stepped:
@@ -664,6 +766,8 @@ class Trainer_incremental(Trainer_base):
             self.train_metrics.update('loss_cont', loss_dict['loss_cont'].item() * self.config['hyperparameter']['cont'])
             self.train_metrics.update('loss_old_step', loss_old.item() if torch.is_tensor(loss_old) else float(loss_old))
             self.train_metrics.update('consistency_ratio', loss_dict['consistency_ratio'].item())
+            if grad_loss is not None:
+                self.train_metrics.update('loss_grad', grad_loss)
 
             # Get First lr
             if batch_idx == 0:
