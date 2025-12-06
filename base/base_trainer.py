@@ -18,16 +18,20 @@ class BaseTrainer:
     """
     def __init__(self, config, logger, gpu):
         self.config = config
-        
+
         cfg_trainer = config['trainer']
         self.epochs = cfg_trainer['epochs']
         self.save_period = cfg_trainer['epochs'] if cfg_trainer['save_period'] == -1 else cfg_trainer['save_period']
         # self.save_period = 1
         self.validation_period = cfg_trainer['validation_period'] if cfg_trainer['validation_period'] == -1 else cfg_trainer['validation_period']
         self.validate_on_test = cfg_trainer.get('validate_on_test', False)
-        self.validate_tail_epochs = cfg_trainer.get('validate_tail_epochs', 15)
+        self.validate_tail_epochs = cfg_trainer.get('validate_tail_epochs', 30)
         self.best_test_miou = -inf
         self.best_test_checkpoint_path = None
+        self.keep_last_checkpoint_only = cfg_trainer.get('keep_last_checkpoint_only', False)
+        self.keep_last_prototype_only = cfg_trainer.get('keep_last_prototype_only', self.keep_last_checkpoint_only)
+        self._latest_checkpoint_path = None
+        self._latest_prototype_path = None
         self.do_test = False
         self.monitor = cfg_trainer.get('monitor', 'off')
         self.reset_best_mnt = cfg_trainer['reset_best_mnt']
@@ -45,7 +49,7 @@ class BaseTrainer:
                 self.writer = TensorboardWriter(config.log_dir, self.logger, cfg_trainer['tensorboard'])
             else:
                 self.writer = TensorboardWriter(config.log_dir, self.logger, False)
-        
+
         if gpu is None:
             # setup GPU device if available, move model into configured device
             self.device, self.device_ids = self._prepare_device(config['n_gpu'])
@@ -100,7 +104,7 @@ class BaseTrainer:
             # save logged informations into log dict
             log = {'epoch': epoch}
             log.update(result)
-            
+
             # print logged informations to the screen
             for key, value in log.items():
                 self.logger.info('    {:15s}: {}'.format(str(key), value))
@@ -163,7 +167,7 @@ class BaseTrainer:
         self.writer.close()
 
     def save_prototypes(self, config, epoch):
-        save_file = str(config.save_dir) + "/prototypes-epoch{}.pth".format(epoch)
+        save_file = Path(config.save_dir) / f"prototypes-epoch{epoch}.pth"
 
         all_info = {
             "numbers": self.numbers,
@@ -173,7 +177,16 @@ class BaseTrainer:
             "phase_bank": self.phase_bank.state_dict() if self.phase_bank is not None else None,
         }
 
-        torch.save(all_info, save_file)
+        torch.save(all_info, str(save_file))
+
+        if self.keep_last_prototype_only and self._latest_prototype_path is not None and \
+                self._latest_prototype_path.exists() and self._latest_prototype_path != save_file:
+            try:
+                self._latest_prototype_path.unlink()
+            except OSError:
+                self.logger.warning(f"Failed to remove old prototype file: {self._latest_prototype_path}")
+
+        self._latest_prototype_path = save_file
 
     def compute_cls_number(self, config):
         self.logger.info("computing number of pixels...")
@@ -259,7 +272,7 @@ class BaseTrainer:
                 self.norm_mean_and_std = norm_mean_and_std
             else:
                 self.norm_mean_and_std = torch.cat([self.prev_norm, norm_mean_and_std], dim=1)
-            
+
         self.model.train()
 
     def compute_noise(self, config):
@@ -313,12 +326,12 @@ class BaseTrainer:
                 self.noise = noise
             else:
                 self.noise = torch.cat([self.prev_noise, noise], dim=0)
-            
+
         self.model.train()
 
     def test(self):
         result = self._test()
-        
+
         if self.rank == 0:
             log = {}
             log.update(result)
@@ -410,9 +423,18 @@ class BaseTrainer:
                 'grad_learner': self._maybe_get_grad_learner_state(),
                 'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
-        filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
-        torch.save(state, filename)
+        filename = self.checkpoint_dir / f'checkpoint-epoch{epoch}.pth'
+        torch.save(state, str(filename))
         self.logger.info("Saving checkpoint: {} ...".format(filename))
+
+        if self.keep_last_checkpoint_only and self._latest_checkpoint_path is not None and \
+                self._latest_checkpoint_path.exists() and self._latest_checkpoint_path != filename:
+            try:
+                self._latest_checkpoint_path.unlink()
+            except OSError:
+                self.logger.warning(f"Failed to remove old checkpoint: {self._latest_checkpoint_path}")
+
+        self._latest_checkpoint_path = filename
 
     def _save_best_model(self, epoch):
         """

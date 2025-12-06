@@ -40,7 +40,15 @@ torch.backends.cudnn.benchmark = True
 
 
 def main(config):
+    # Allow a config-only override to avoid repeating --workers/--num_workers on every run
+    workers_override = config.config['data_loader']['args'].pop('num_workers_override', None)
+    if workers_override is not None:
+        config.config['data_loader']['args']['num_workers'] = workers_override
+
     ngpus_per_node = torch.cuda.device_count()
+    # 对齐 VOC 训练脚本的行为：当可用 GPU 数量少于配置数量时直接收缩，避免 BaseTrainer 再次发出警告。
+    if config['n_gpu'] > ngpus_per_node:
+        config.config['n_gpu'] = ngpus_per_node
     if config['multiprocessing_distributed']:
         # Single node, mutliple GPUs
         config.config['world_size'] = ngpus_per_node * config['world_size']
@@ -124,7 +132,7 @@ def main_worker(gpu, ngpus_per_node, config):
     # Convert BN to SyncBN for DDP
     if config['multiprocessing_distributed'] and (config['arch']['args']['norm_act'] == 'bn_sync'):
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    logger.info(model)
+    # logger.info(model)
 
     # Load previous step weights
     if task_step > 0:
@@ -241,6 +249,7 @@ if __name__ == '__main__':
         CustomArgs(['--task_name'], type=str, target='data_loader;args;task;name'),
         CustomArgs(['--task_step'], type=int, target='data_loader;args;task;step'),
         CustomArgs(['--task_setting'], type=str, target='data_loader;args;task;setting'),
+        CustomArgs(['--workers', '--num_workers'], type=int, target='data_loader;args;num_workers'),
 
         CustomArgs(['--pos_weight'], type=float, target='hyperparameter;pos_weight'),
         CustomArgs(['--mbce'], type=float, target='hyperparameter;mbce'),
@@ -248,6 +257,11 @@ if __name__ == '__main__':
         CustomArgs(['--ac'], type=float, target='hyperparameter;ac'),
         CustomArgs(['--enable_mbce_distill'], action='store_true', target='hyperparameter;enable_mbce_distill'),
         CustomArgs(['--distill_bg_only'], action='store_true', target='hyperparameter;distill_bg_only'),
+        CustomArgs(['--use_consistency_filter'], action='store_true', target='hyperparameter;use_consistency_filter'),
+        CustomArgs(['--consistency_old_thresh'], type=float, target='hyperparameter;consistency_old_thresh'),
+        CustomArgs(['--consistency_curr_thresh'], type=float, target='hyperparameter;consistency_curr_thresh'),
+        CustomArgs(['--use_separate_old_update'], action='store_true', target='hyperparameter;use_separate_old_update'),
+        CustomArgs(['--pseudo_grad_scale'], type=float, target='hyperparameter;pseudo_grad_scale'),
 
         # Gradient learner toggles
         CustomArgs(['--grad'], action='store_true', target='hyperparameter;grad_learner;enabled'),
@@ -265,6 +279,10 @@ if __name__ == '__main__':
         CustomArgs(['--phase_replay'], action='store_true', target='hyperparameter;phase_replay;enabled'),
         CustomArgs(['--phase_mid_ratio'], type=float, target='hyperparameter;phase_replay;mid_ratio'),
         CustomArgs(['--phase_momentum'], type=float, target='hyperparameter;phase_replay;phase_momentum'),
+
+        # 验证/测试评估控制：开启后在末尾若干 epoch 上跑测试集
+        CustomArgs(['--validate'], action='store_true', target='trainer;validate_on_test'),
+        CustomArgs(['--validate_tail_epochs'], type=int, target='trainer;validate_tail_epochs'),
 
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),

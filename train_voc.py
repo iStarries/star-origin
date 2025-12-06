@@ -69,6 +69,11 @@ torch.backends.cudnn.benchmark = True
 
 
 def main(config):
+    # Allow a config-only override to avoid repeating --workers/--num_workers on every run
+    workers_override = config.config['data_loader']['args'].pop('num_workers_override', None)
+    if workers_override is not None:
+        config.config['data_loader']['args']['num_workers'] = workers_override
+
     ngpus_per_node = torch.cuda.device_count()
     if config['multiprocessing_distributed']:
         # Single node, mutliple GPUs
@@ -294,6 +299,7 @@ if __name__ == '__main__':
         CustomArgs(['--task_name'], type=str, target='data_loader;args;task;name'),
         CustomArgs(['--task_step'], type=int, target='data_loader;args;task;step'),
         CustomArgs(['--task_setting'], type=str, target='data_loader;args;task;setting'),
+        CustomArgs(['--workers', '--num_workers'], type=int, target='data_loader;args;num_workers'),
 
         CustomArgs(['--pos_weight'], type=float, target='hyperparameter;pos_weight'),
         CustomArgs(['--mbce'], type=float, target='hyperparameter;mbce'),
