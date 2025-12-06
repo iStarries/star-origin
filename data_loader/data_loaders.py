@@ -1,7 +1,22 @@
+import multiprocessing
 from pathlib import Path
 from torch.utils.data import DataLoader, random_split, ConcatDataset
 from data_loader.task import get_task_labels, get_per_task_classes
 from data_loader.dataset import VOCSegmentationIncremental, ADESegmentationIncremental, VOCSegmentationIncrementalMemory, ADESegmentationIncrementalMemory
+
+
+def _resolve_num_workers(requested: int) -> int:
+    """Clamp/auto-fill num_workers based on available CPU cores."""
+
+    cpu_count = multiprocessing.cpu_count() or 0
+
+    if requested is None:
+        return 0
+
+    if requested == -1:
+        return cpu_count
+
+    return max(0, min(requested, cpu_count))
 
 
 class VOCIncrementalDataLoader():
@@ -57,9 +72,25 @@ class VOCIncrementalDataLoader():
                 **train['args'],
             )
 
-        self.init_train_kwargs = {'num_workers': num_workers, "pin_memory": pin_memory, "batch_size": train["batch_size"]}
-        self.init_val_kwargs = {'num_workers': num_workers, "pin_memory": pin_memory, "batch_size": val["batch_size"]}
-        self.init_test_kwargs = {'num_workers': num_workers, "pin_memory": pin_memory, "batch_size": test["batch_size"]}
+        self.num_workers = _resolve_num_workers(num_workers)
+        self.init_train_kwargs = {
+            'num_workers': self.num_workers,
+            "pin_memory": pin_memory,
+            "batch_size": train["batch_size"],
+            "persistent_workers": self.num_workers > 0,
+        }
+        self.init_val_kwargs = {
+            'num_workers': self.num_workers,
+            "pin_memory": pin_memory,
+            "batch_size": val["batch_size"],
+            "persistent_workers": self.num_workers > 0,
+        }
+        self.init_test_kwargs = {
+            'num_workers': self.num_workers,
+            "pin_memory": pin_memory,
+            "batch_size": test["batch_size"],
+            "persistent_workers": self.num_workers > 0,
+        }
 
     def get_memory(self, config, concat=True):
         if self.step > 0:
@@ -100,9 +131,9 @@ class VOCIncrementalDataLoader():
 
     def dataset_info(self):
         if self.memory is not None:
-            return f"The number of datasets: {len(self.train_set) - len(self.memory)}+{len(self.memory)} / {len(self.val_set)} / {len(self.test_set)}"
+            return f"The number of datasets: {len(self.train_set) - len(self.memory)}+{len(self.memory)} / {len(self.val_set)} / {len(self.test_set)} (workers: {self.num_workers})"
         else:
-            return f"The number of datasets: {len(self.train_set)} / {len(self.val_set)} / {len(self.test_set)}"
+            return f"The number of datasets: {len(self.train_set)} / {len(self.val_set)} / {len(self.test_set)} (workers: {self.num_workers})"
 
     def task_info(self):
         return {"setting": self.setting, "name": self.name, "step": self.step,
@@ -173,9 +204,25 @@ class ADEIncrementalDataLoader():
                 **train['args'],
             )
 
-        self.init_train_kwargs = {'num_workers': num_workers, "pin_memory": pin_memory, "batch_size": train["batch_size"]}
-        self.init_val_kwargs = {'num_workers': num_workers, "pin_memory": pin_memory, "batch_size": val["batch_size"]}
-        self.init_test_kwargs = {'num_workers': num_workers, "pin_memory": pin_memory, "batch_size": test["batch_size"]}
+        self.num_workers = _resolve_num_workers(num_workers)
+        self.init_train_kwargs = {
+            'num_workers': self.num_workers,
+            "pin_memory": pin_memory,
+            "batch_size": train["batch_size"],
+            "persistent_workers": self.num_workers > 0,
+        }
+        self.init_val_kwargs = {
+            'num_workers': self.num_workers,
+            "pin_memory": pin_memory,
+            "batch_size": val["batch_size"],
+            "persistent_workers": self.num_workers > 0,
+        }
+        self.init_test_kwargs = {
+            'num_workers': self.num_workers,
+            "pin_memory": pin_memory,
+            "batch_size": test["batch_size"],
+            "persistent_workers": self.num_workers > 0,
+        }
 
     def get_train_loader(self, sampler=None):
         return DataLoader(self.train_set, **self.init_train_kwargs, drop_last=True,
@@ -218,9 +265,9 @@ class ADEIncrementalDataLoader():
     
     def dataset_info(self):
         if self.memory is not None:
-            return f"The number of datasets: {len(self.train_set) - len(self.memory)}+{len(self.memory)} / {len(self.val_set)} / {len(self.test_set)}"
+            return f"The number of datasets: {len(self.train_set) - len(self.memory)}+{len(self.memory)} / {len(self.val_set)} / {len(self.test_set)} (workers: {self.num_workers})"
         else:
-            return f"The number of datasets: {len(self.train_set)} / {len(self.val_set)} / {len(self.test_set)}"
+            return f"The number of datasets: {len(self.train_set)} / {len(self.val_set)} / {len(self.test_set)} (workers: {self.num_workers})"
 
     def task_info(self):
         return {"setting": self.setting, "name": self.name, "step": self.step,

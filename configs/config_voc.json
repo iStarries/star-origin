@@ -59,6 +59,7 @@
                 "batch_size": 1
             },
             "num_workers": 4,
+            "num_workers_override": 12,
             "pin_memory": true,
             "memory": {"mem_size": 0}
         }
