@@ -11,6 +11,13 @@ from models.loss import BCELoss, WBCELoss, PKDLoss, ContLoss
 from models.gradient_learner import GradientLearner
 from data_loader import ADE
 from utils.prototype_bank import PhasePrototypeBank
+from utils.fft_utils import (
+    decompose_spectrum,
+    extract_mid,
+    get_mid_slices,
+    reconstruct_feature,
+    replace_mid,
+)
 
 class Trainer_base(BaseTrainer):
     """
@@ -533,18 +540,69 @@ class Trainer_incremental(Trainer_base):
                 logit_old, features_old = None, None
                 pseudo_label_region_base = torch.zeros_like(data['label'], dtype=torch.bool).unsqueeze(1)
 
+            def _legacy_fake_feature(cls_idx, num_samples: int):
+                base = self.prev_prototypes[cls_idx].reshape(1, -1, 1, 1)
+                per_cls_fake = base.repeat(1, 1, num_samples, 1)
+                noise = torch.randn_like(per_cls_fake) * self.prev_noise[cls_idx].reshape(1, -1, 1, 1)
+                per_cls_fake = per_cls_fake + noise
+                rand_norm = (
+                    torch.randn_like(per_cls_fake) * self.prev_norm[1, cls_idx].reshape(1, 1, 1, 1)
+                    + self.prev_norm[0, cls_idx].reshape(1, 1, 1, 1)
+                )
+                return per_cls_fake * rand_norm
+
             fake_features = []
+            phase_replay_active = (
+                self.phase_replay_enabled
+                and self.phase_bank is not None
+                and features_old is not None
+            )
+            mid_slices = None
+            pred_small = None
+            if phase_replay_active:
+                _, _, h, w = features_old[-1].shape
+                mid_slices = get_mid_slices(h, w, self.phase_bank.mid_ratio)
+                pred_small = (
+                    F.interpolate(pred.unsqueeze(1).float(), size=(h, w), mode="nearest")
+                    .squeeze(1)
+                    .long()
+                )
+
             for cls in range(0, self.per_iter_prev_number.shape[0]):
-                per_cls_fake_features = \
-                    self.prev_prototypes[cls].reshape(1, -1, 1, 1).repeat(1, 1, self.per_iter_prev_number[cls], 1)
-                noise = \
-                    torch.randn_like(per_cls_fake_features) * self.prev_noise[cls].reshape(1, -1, 1, 1)
-                per_cls_fake_features = per_cls_fake_features + noise
-                rand_norm = \
-                    torch.randn_like(per_cls_fake_features) * \
-                    self.prev_norm[1, cls].reshape(1, 1, 1, 1) + \
-                    self.prev_norm[0, cls].reshape(1, 1, 1, 1)
-                per_cls_fake_features = per_cls_fake_features * rand_norm
+                num_samples = int(self.per_iter_prev_number[cls].item())
+                if num_samples == 0:
+                    fake_features.append(torch.empty(1, self.prev_prototypes.shape[1], 0, 1, device=self.device))
+                    continue
+
+                per_cls_fake_features = None
+                class_id = self.task_info['old_class'][cls] if 'old_class' in self.task_info else cls + 1
+
+                if phase_replay_active and self.phase_bank.has_class(class_id):
+                    mask_cls = (pred_small == class_id).float().unsqueeze(1)
+                    if mask_cls.sum() > 0:
+                        masked_feature = features_old[-1] * mask_cls
+                        amplitude, phase = decompose_spectrum(masked_feature)
+                        amp_mid, _ = extract_mid(amplitude, phase, mid_slices)
+
+                        phase_mid_proto = self.phase_bank.get_phase(class_id).unsqueeze(0).expand_as(amp_mid)
+                        amp_repl, phase_repl = replace_mid(amplitude, phase, amp_mid, phase_mid_proto, mid_slices)
+                        recon_feature = reconstruct_feature(amp_repl, phase_repl).detach() * mask_cls
+
+                        flat_feature = recon_feature.permute(0, 2, 3, 1).reshape(-1, recon_feature.shape[1])
+                        flat_mask = mask_cls.view(-1) > 0
+                        selected = flat_feature[flat_mask]
+
+                        if selected.shape[0] > 0:
+                            if selected.shape[0] >= num_samples:
+                                idx = torch.randperm(selected.shape[0], device=selected.device)[:num_samples]
+                            else:
+                                idx = torch.randint(0, selected.shape[0], (num_samples,), device=selected.device)
+                            chosen = selected[idx]
+                            per_cls_fake_features = chosen.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
+
+                if per_cls_fake_features is None:
+                    per_cls_fake_features = _legacy_fake_feature(cls, num_samples)
+
                 fake_features.append(per_cls_fake_features)
 
             fake_features = torch.cat(fake_features, dim=2)

@@ -1,0 +1,18 @@
+{
+  "steps": [1, 2, 3, 4, 5],
+  "methods": [
+    {
+      "key": "original",
+      "label": "STAR-Proto",
+      "biou": [0.1447, 0.1552, 0.1616, 0.1729, 0.1655],
+      "bf": [0.4997, 0.5156, 0.5258, 0.5412, 0.5303]
+    },
+    {
+      "key": "phase",
+      "label": "Phase-Proto",
+      "biou": [0.1437, 0.1536, 0.1631, 0.1730, 0.1663],
+      "bf": [0.4992, 0.5135, 0.5271, 0.5421, 0.5311]
+    }
+  ],
+  "description": "Boundary IoU and BF-score (macro over 15 old classes) on VOC 15-1 for steps 1-5."
+}
