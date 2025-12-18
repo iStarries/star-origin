@@ -25,7 +25,7 @@ class BaseTrainer:
         # self.save_period = 1
         self.validation_period = cfg_trainer['validation_period'] if cfg_trainer['validation_period'] == -1 else cfg_trainer['validation_period']
         self.validate_on_test = cfg_trainer.get('validate_on_test', False)
-        self.validate_tail_epochs = cfg_trainer.get('validate_tail_epochs', 30)
+        self.validate_tail_epochs = cfg_trainer.get('validate_tail_epochs', 20)
         self.best_test_miou = -inf
         self.best_test_checkpoint_path = None
         self.keep_last_checkpoint_only = cfg_trainer.get('keep_last_checkpoint_only', False)

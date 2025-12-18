@@ -135,6 +135,12 @@ class Trainer_base(BaseTrainer):
         # Phase replay configuration (disabled by default)
         phase_cfg = self.config['hyperparameter'].get('phase_replay', {})
         self.phase_replay_enabled = phase_cfg.get('enabled', False)
+        self.phase_ratio = phase_cfg.get('phase_ratio', 1.0)
+        self.phase_loss_weight = phase_cfg.get('phase_loss_weight', 1.0)
+        proto_sampling_cfg = phase_cfg.get('proto_sampling', {})
+        self.phase_proto_sampling_min_norm = proto_sampling_cfg.get('min_norm_eps', 1e-6)
+        self.phase_proto_sampling_max_trials = proto_sampling_cfg.get('max_trials', 3)
+        self.phase_proto_amp_scale = proto_sampling_cfg.get('amp_scale', 1.0)
         if self.phase_replay_enabled:
             self.phase_bank = PhasePrototypeBank(
                 mid_ratio=phase_cfg.get('mid_ratio', 0.5),
@@ -326,6 +332,12 @@ class Trainer_base(BaseTrainer):
                 logit_old, features_old = None, None
                 pseudo_label_region_base = torch.zeros_like(data['label'], dtype=torch.bool).unsqueeze(1)
 
+            phase_replay_active = (
+                self.phase_replay_enabled
+                and self.phase_bank is not None
+                and features_old is not None
+            )
+
             def _legacy_fake_feature(cls_idx, num_samples: int):
                 base = self.prev_prototypes[cls_idx].reshape(1, -1, 1, 1)
                 per_cls_fake = base.repeat(1, 1, num_samples, 1)
@@ -337,77 +349,102 @@ class Trainer_base(BaseTrainer):
                 )
                 return per_cls_fake * rand_norm
 
-            def _generate_fake_features_for_class(
-                cls_idx: int,
-                class_id: int,
-                num_samples: int,
-                features_old_top: torch.Tensor,
-                pred_resized: torch.Tensor,
-                mid_slices,
-            ):
+            def _phase_fake_feature_from_pred(class_id: int, num_phase: int, pred_resized: torch.Tensor,
+                                              features_old_top: torch.Tensor, mid_slices):
                 channels = self.prev_prototypes.shape[1]
-                if num_samples <= 0:
+                if (
+                    num_phase <= 0
+                    or pred_resized is None
+                    or features_old_top is None
+                    or mid_slices is None
+                    or not phase_replay_active
+                    or not self.phase_bank.has_class(class_id)
+                ):
                     return torch.empty(1, channels, 0, 1, device=self.device)
 
-                if not phase_replay_active or not self.phase_bank.has_class(class_id):
-                    return _legacy_fake_feature(cls_idx, num_samples)
-
                 mask_cls = (pred_resized == class_id).float().unsqueeze(1)
-                mask_pixels = int(mask_cls.sum().item())
+                if mask_cls.sum() == 0:
+                    return torch.empty(1, channels, 0, 1, device=self.device)
 
-                if mask_pixels > 0:
-                    masked_feature = features_old_top * mask_cls
-                    amplitude, phase = decompose_spectrum(masked_feature)
-                    amp_mid, _ = extract_mid(amplitude, phase, mid_slices)
+                masked_feature = features_old_top * mask_cls
+                amplitude, phase = decompose_spectrum(masked_feature)
+                amp_mid, _ = extract_mid(amplitude, phase, mid_slices)
 
-                    phase_mid_proto = self.phase_bank.get_phase(class_id).unsqueeze(0).expand_as(amp_mid)
-                    amp_repl, phase_repl = replace_mid(amplitude, phase, amp_mid, phase_mid_proto, mid_slices)
-                    recon_feature = reconstruct_feature(amp_repl, phase_repl).detach() * mask_cls
+                phase_mid_proto = self.phase_bank.get_phase(class_id).unsqueeze(0).expand_as(amp_mid)
+                amp_repl, phase_repl = replace_mid(amplitude, phase, amp_mid, phase_mid_proto, mid_slices)
+                recon_feature = reconstruct_feature(amp_repl, phase_repl).detach() * mask_cls
 
-                    flat_feature = recon_feature.permute(0, 2, 3, 1).reshape(-1, recon_feature.shape[1])
-                    flat_mask = mask_cls.view(-1) > 0
-                    selected = flat_feature[flat_mask]
+                flat_feature = recon_feature.permute(0, 2, 3, 1).reshape(-1, recon_feature.shape[1])
+                flat_mask = mask_cls.view(-1) > 0
+                selected = flat_feature[flat_mask]
 
-                    if selected.shape[0] > 0:
-                        if selected.shape[0] >= num_samples:
-                            idx = torch.randperm(selected.shape[0], device=selected.device)[:num_samples]
-                        else:
-                            idx = torch.randint(0, selected.shape[0], (num_samples,), device=selected.device)
-                        chosen = selected[idx]
-                        return chosen.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
+                if selected.shape[0] == 0:
+                    return torch.empty(1, channels, 0, 1, device=self.device)
 
-                amp_mean_mid, amp_std_mid = self.phase_bank.get_amp_stats(class_id)
+                if selected.shape[0] >= num_phase:
+                    idx = torch.randperm(selected.shape[0], device=selected.device)[:num_phase]
+                else:
+                    idx = torch.randint(0, selected.shape[0], (num_phase,), device=selected.device)
+                chosen = selected[idx]
+                return chosen.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
+
+            def _phase_fake_feature_from_prototype_only(class_id: int, num_phase: int, full_shape_hw, mid_slices):
+                channels = self.prev_prototypes.shape[1]
+                if (
+                    num_phase <= 0
+                    or mid_slices is None
+                    or full_shape_hw is None
+                    or not phase_replay_active
+                    or not self.phase_bank.has_class(class_id)
+                ):
+                    return torch.empty(1, channels, 0, 1, device=self.device)
+
+                h, w = full_shape_hw
                 hs, ws = mid_slices
-                _, _, h, w = features_old_top.shape
                 phase_mid_proto = self.phase_bank.get_phase(class_id)
-                proto_amp_scale = getattr(self, "phase_proto_amp_scale", 1.0)
+                amp_mean_mid, amp_std_mid = self.phase_bank.get_amp_stats(class_id)
 
-                proto_vectors = []
-                for _ in range(num_samples):
-                    amp_mid_sample = amp_mean_mid + proto_amp_scale * amp_std_mid * torch.randn_like(amp_std_mid)
+                min_norm = self.phase_proto_sampling_min_norm
+                max_trials = self.phase_proto_sampling_max_trials
+                remaining = num_phase
+                vectors = []
+
+                for _ in range(max_trials):
+                    if remaining <= 0:
+                        break
+                    amp_mid_sample = amp_mean_mid + self.phase_proto_amp_scale * amp_std_mid * torch.randn_like(amp_std_mid)
                     amplitude_full = torch.zeros((1, channels, h, w), device=self.device, dtype=amp_mid_sample.dtype)
                     phase_full = torch.zeros_like(amplitude_full)
-
                     amplitude_full[..., hs, ws] = amp_mid_sample.unsqueeze(0)
                     phase_full[..., hs, ws] = phase_mid_proto.unsqueeze(0)
 
-                    proto_feature = reconstruct_feature(amplitude_full, phase_full)
-                    proto_vectors.append(proto_feature.mean(dim=(2, 3)).squeeze(0))
+                    proto_feature = reconstruct_feature(amplitude_full, phase_full).detach()
+                    flat_feature = proto_feature.permute(0, 2, 3, 1).reshape(-1, channels)
+                    norms = flat_feature.norm(p=2, dim=1)
+                    valid_idx = torch.nonzero(norms > min_norm, as_tuple=False).squeeze(1)
+                    if valid_idx.numel() == 0:
+                        continue
 
-                if proto_vectors:
-                    stacked = torch.stack(proto_vectors, dim=0)
-                    return stacked.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
+                    sample_num = min(remaining, valid_idx.numel())
+                    perm = torch.randperm(valid_idx.numel(), device=self.device)[:sample_num]
+                    chosen_idx = valid_idx[perm]
+                    chosen_vecs = flat_feature[chosen_idx]
+                    vectors.append(chosen_vecs)
+                    remaining -= chosen_vecs.shape[0]
 
-                return _legacy_fake_feature(cls_idx, num_samples)
+                if not vectors:
+                    return torch.empty(1, channels, 0, 1, device=self.device)
 
-            fake_features = []
-            phase_replay_active = (
-                self.phase_replay_enabled
-                and self.phase_bank is not None
-                and features_old is not None
-            )
+                stacked = torch.cat(vectors, dim=0)
+                if stacked.shape[0] > num_phase:
+                    perm = torch.randperm(stacked.shape[0], device=self.device)[:num_phase]
+                    stacked = stacked[perm]
+
+                return stacked.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
+
             mid_slices = None
             pred_small = None
+            features_old_top = None
             if phase_replay_active:
                 _, _, h, w = features_old[-1].shape
                 mid_slices = get_mid_slices(h, w, self.phase_bank.mid_ratio)
@@ -417,25 +454,64 @@ class Trainer_base(BaseTrainer):
                     .long()
                 )
                 features_old_top = features_old[-1]
-            else:
-                features_old_top = None
+
+            fake_features_legacy = []
+            fake_features_phase = []
+            channels = self.prev_prototypes.shape[1]
+            empty_feature = torch.empty(1, channels, 0, 1, device=self.device)
 
             for cls in range(0, self.per_iter_prev_number.shape[0]):
                 num_samples = int(self.per_iter_prev_number[cls].item())
                 class_id = self.task_info['old_class'][cls] if 'old_class' in self.task_info else cls + 1
-                per_cls_fake_features = _generate_fake_features_for_class(
-                    cls,
-                    class_id,
-                    num_samples,
-                    features_old_top,
-                    pred_small if pred_small is not None else None,
-                    mid_slices,
-                )
 
-                fake_features.append(per_cls_fake_features)
+                if num_samples == 0:
+                    fake_features_legacy.append(empty_feature)
+                    fake_features_phase.append(empty_feature)
+                    continue
 
-            fake_features = torch.cat(fake_features, dim=2)
-            fake_label = torch.zeros(1, fake_features.shape[2], 1, requires_grad=False).to(self.device)
+                # 旧版伪特征始终生成
+                per_cls_legacy = _legacy_fake_feature(cls, num_samples)
+                fake_features_legacy.append(per_cls_legacy)
+
+                # 相位伪特征尝试生成
+                if phase_replay_active and self.phase_bank.has_class(class_id):
+                    phase_k = int(round(num_samples * self.phase_ratio))
+                    if phase_k > 0:
+                        per_cls_phase_list = []
+                        phase_from_pred = _phase_fake_feature_from_pred(
+                            class_id, phase_k, pred_small, features_old_top, mid_slices
+                        )
+                        if phase_from_pred.shape[2] > 0:
+                            per_cls_phase_list.append(phase_from_pred)
+
+                        remaining = phase_k - sum(item.shape[2] for item in per_cls_phase_list)
+                        if remaining > 0:
+                            phase_from_proto = _phase_fake_feature_from_prototype_only(
+                                class_id, remaining, (h, w) if features_old_top is not None else None, mid_slices
+                            )
+                            if phase_from_proto.shape[2] > 0:
+                                per_cls_phase_list.append(phase_from_proto)
+
+                        if per_cls_phase_list:
+                            fake_features_phase.append(torch.cat(per_cls_phase_list, dim=2))
+                        else:
+                            fake_features_phase.append(empty_feature)
+                    else:
+                        fake_features_phase.append(empty_feature)
+                else:
+                    fake_features_phase.append(empty_feature)
+
+            fake_legacy = torch.cat(fake_features_legacy, dim=2)
+            fake_phase = torch.cat(fake_features_phase, dim=2)
+            fake_features = torch.cat([fake_legacy, fake_phase], dim=2)
+
+            n_legacy = fake_legacy.shape[2]
+            n_phase = fake_phase.shape[2]
+            n_total_fake = fake_features.shape[2]
+
+            fake_label_legacy = torch.zeros(1, n_legacy, 1, requires_grad=False).to(self.device)
+            fake_label_phase = torch.zeros(1, n_phase, 1, requires_grad=False).to(self.device)
+            fake_label = torch.zeros(1, n_total_fake, 1, requires_grad=False).to(self.device)
 
             if self.model_old is not None:
                 region_bg = torch.logical_and(pred == 0, data['label'] == 0)[:, 8::16, 8::16]
@@ -482,17 +558,34 @@ class Trainer_base(BaseTrainer):
             else:
                 loss_mbce_extra_bg = torch.zeros_like(loss_mbce_ori)
 
-            loss_mbce_fake = self.BCELoss_fake(
-                logits_for_fake[:, -self.n_new_classes:],
-                fake_label
-            ).mean(dim=[0, 2, 3])
+            zeros_like_ori = torch.zeros_like(loss_mbce_ori)
+            loss_mbce_fake_legacy = zeros_like_ori
+            loss_mbce_fake_phase = zeros_like_ori
+
+            if n_legacy > 0:
+                logits_fake_legacy = logits_for_fake[:, :, :n_legacy, :]
+                loss_mbce_fake_legacy = self.BCELoss_fake(
+                    logits_fake_legacy[:, -self.n_new_classes:], fake_label_legacy
+                ).mean(dim=[0, 2, 3])
+
+            if n_phase > 0:
+                logits_fake_phase = logits_for_fake[:, :, n_legacy:n_total_fake, :]
+                loss_mbce_fake_phase = self.BCELoss_fake(
+                    logits_fake_phase[:, -self.n_new_classes:], fake_label_phase
+                ).mean(dim=[0, 2, 3])
 
             stride_num = features[-1].shape[0] * features[-1].shape[2] * features[-1].shape[3]
             weight_extra_bg = self.extra_bg_ratio * region_bg.sum() / stride_num
-            weight_fake = fake_label.shape[1] / stride_num
+            weight_fake_legacy = n_legacy / stride_num
+            weight_fake_phase = n_phase / stride_num
 
-            loss_mbce = loss_mbce_ori + loss_mbce_fake * weight_fake + loss_mbce_extra_bg * weight_extra_bg
-            loss_mbce = loss_mbce / (1 + weight_extra_bg + weight_fake)
+            loss_mbce = loss_mbce_ori
+            loss_mbce = loss_mbce + loss_mbce_fake_legacy * weight_fake_legacy
+            loss_mbce = loss_mbce + loss_mbce_fake_phase * weight_fake_phase * self.phase_loss_weight
+            loss_mbce = loss_mbce + loss_mbce_extra_bg * weight_extra_bg
+
+            denom = 1 + weight_extra_bg + weight_fake_legacy + weight_fake_phase * self.phase_loss_weight
+            loss_mbce = loss_mbce / denom
 
             if self.enable_mbce_distill and logit_old is not None:
                 loss_mbce_distill = self.DistillBCELoss(
@@ -517,6 +610,10 @@ class Trainer_base(BaseTrainer):
             'loss_pkd': loss_pkd,
             'loss_cont': loss_cont,
             'consistency_ratio': consistency_ratio,
+            'loss_mbce_fake_legacy': loss_mbce_fake_legacy,
+            'loss_mbce_fake_phase': loss_mbce_fake_phase,
+            'num_fake_legacy': torch.tensor(float(n_legacy), device=self.device),
+            'num_fake_phase': torch.tensor(float(n_phase), device=self.device),
         }
 
         if return_logit:
@@ -668,6 +765,7 @@ class Trainer_incremental(Trainer_base):
         self.train_metrics = MetricTracker(
             'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_bce_distill',
             'loss_old_step', 'consistency_ratio', 'loss_grad',
+            'loss_fake_legacy', 'loss_fake_phase', 'num_fake_legacy', 'num_fake_phase',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -865,6 +963,10 @@ class Trainer_incremental(Trainer_base):
                                       loss_dict['loss_mbce_distill'].sum().item() * distill_weight)
             self.train_metrics.update('loss_pkd', loss_dict['loss_pkd'].sum().item() * self.config['hyperparameter']['pkd'])
             self.train_metrics.update('loss_cont', loss_dict['loss_cont'].item() * self.config['hyperparameter']['cont'])
+            self.train_metrics.update('loss_fake_legacy', loss_dict['loss_mbce_fake_legacy'].sum().item())
+            self.train_metrics.update('loss_fake_phase', loss_dict['loss_mbce_fake_phase'].sum().item())
+            self.train_metrics.update('num_fake_legacy', loss_dict['num_fake_legacy'].item())
+            self.train_metrics.update('num_fake_phase', loss_dict['num_fake_phase'].item())
             self.train_metrics.update('loss_old_step', loss_old.item() if torch.is_tensor(loss_old) else float(loss_old))
             self.train_metrics.update('consistency_ratio', loss_dict['consistency_ratio'].item())
             if grad_loss is not None:
