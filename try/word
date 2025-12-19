@@ -1,0 +1,3 @@
+grep -n "map_replay" /media/wyh/star/trainer/trainer_voc.py
+grep -n "loss_map" /media/wyh/star/trainer/trainer_voc.py
+grep -n "num_map_replay" /media/wyh/star/trainer/trainer_voc.py

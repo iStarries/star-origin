@@ -83,6 +83,25 @@ class DeepLabV3(nn.Module):
         x_o = torch.cat(out, dim=1)  # [N, |Ct|, H, W]
         return x_o
 
+    def forward_from_top_feature(self, x_pl: torch.Tensor, out_size=None) -> torch.Tensor:
+        """Forward only the segmentation head given a top-level feature map.
+
+        This is used by feature-map replay, where we already have the top feature
+        (ASPP output) and want logits without running the backbone.
+
+        Args:
+            x_pl: Tensor of shape [N, 256, h, w] (same as ASPP output).
+            out_size: Optional spatial size (H, W) to upsample logits to.
+
+        Returns:
+            logits of shape [N, tot_classes, h, w] if out_size is None,
+            otherwise [N, tot_classes, H, W].
+        """
+        logits_small = self.forward_class_prediction(x_pl)
+        if out_size is None:
+            return logits_small
+        return F.interpolate(logits_small, size=out_size, mode="bilinear", align_corners=False)
+
     def _init_classifier(self):
         # Random Initialization
         for m in self.cls.modules():

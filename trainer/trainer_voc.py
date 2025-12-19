@@ -137,6 +137,19 @@ class Trainer_base(BaseTrainer):
         self.phase_replay_enabled = phase_cfg.get('enabled', False)
         self.phase_ratio = phase_cfg.get('phase_ratio', 1.0)
         self.phase_loss_weight = phase_cfg.get('phase_loss_weight', 1.0)
+
+        # Feature-map replay configuration (Direction C)
+        map_cfg = phase_cfg.get('map_replay', {})
+        self.map_replay_enabled = map_cfg.get('enabled', False)
+        self.map_replay_num_maps = int(map_cfg.get('num_maps_per_iter', 0))
+        self.map_replay_weight = float(map_cfg.get('weight', 1.0))
+        self.map_replay_w_distill = float(map_cfg.get('w_distill', 1.0))
+        self.map_replay_w_new0 = float(map_cfg.get('w_new0', 1.0))
+        self.map_replay_w_grad = float(map_cfg.get('w_grad', 0.0))
+        self.map_replay_w_local = float(map_cfg.get('w_local', 0.0))
+        self.map_replay_teacher_conf = float(map_cfg.get('teacher_conf_thresh', 0.0))
+        self.map_replay_eps = float(map_cfg.get('eps', 1e-6))
+        self.map_replay_use_pred_first = bool(map_cfg.get('use_pred_first', True))
         proto_sampling_cfg = phase_cfg.get('proto_sampling', {})
         self.phase_proto_sampling_min_norm = proto_sampling_cfg.get('min_norm_eps', 1e-6)
         self.phase_proto_sampling_max_trials = proto_sampling_cfg.get('max_trials', 3)
@@ -372,7 +385,7 @@ class Trainer_base(BaseTrainer):
 
                 phase_mid_proto = self.phase_bank.get_phase(class_id).unsqueeze(0).expand_as(amp_mid)
                 amp_repl, phase_repl = replace_mid(amplitude, phase, amp_mid, phase_mid_proto, mid_slices)
-                recon_feature = reconstruct_feature(amp_repl, phase_repl).detach() * mask_cls
+                recon_feature = reconstruct_feature(amp_repl, phase_repl, enforce_hermitian=True).detach() * mask_cls
 
                 flat_feature = recon_feature.permute(0, 2, 3, 1).reshape(-1, recon_feature.shape[1])
                 flat_mask = mask_cls.view(-1) > 0
@@ -418,7 +431,7 @@ class Trainer_base(BaseTrainer):
                     amplitude_full[..., hs, ws] = amp_mid_sample.unsqueeze(0)
                     phase_full[..., hs, ws] = phase_mid_proto.unsqueeze(0)
 
-                    proto_feature = reconstruct_feature(amplitude_full, phase_full).detach()
+                    proto_feature = reconstruct_feature(amplitude_full, phase_full, enforce_hermitian=True).detach()
                     flat_feature = proto_feature.permute(0, 2, 3, 1).reshape(-1, channels)
                     norms = flat_feature.norm(p=2, dim=1)
                     valid_idx = torch.nonzero(norms > min_norm, as_tuple=False).squeeze(1)
@@ -441,6 +454,81 @@ class Trainer_base(BaseTrainer):
                     stacked = stacked[perm]
 
                 return stacked.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
+
+            # --- Direction C: feature-map replay helpers ---
+            def _unwrap_model(m):
+                return m.module if isinstance(m, (nn.DataParallel, DDP)) else m
+
+            def _phase_reconstruct_map_from_pred(
+                class_id: int,
+                pred_resized: torch.Tensor,
+                features_old_top: torch.Tensor,
+                mid_slices,
+            ):
+                """Reconstruct a feature map using old-model predicted region.
+
+                Returns:
+                    recon_map: Tensor[1, C, h, w] or None
+                    mask_cls:  Tensor[1, 1, h, w] or None
+                """
+                if (
+                    pred_resized is None
+                    or features_old_top is None
+                    or mid_slices is None
+                    or not phase_replay_active
+                    or not self.phase_bank.has_class(class_id)
+                ):
+                    return None, None
+
+                mask_cls = (pred_resized == class_id).float().unsqueeze(1)
+                if mask_cls.sum() == 0:
+                    return None, None
+
+                masked_feature = features_old_top * mask_cls
+                amplitude, phase = decompose_spectrum(masked_feature)
+                amp_mid, _ = extract_mid(amplitude, phase, mid_slices)
+                phase_mid_proto = self.phase_bank.get_phase(class_id).unsqueeze(0).expand_as(amp_mid)
+                amp_repl, phase_repl = replace_mid(amplitude, phase, amp_mid, phase_mid_proto, mid_slices)
+
+                recon_map = reconstruct_feature(amp_repl, phase_repl, enforce_hermitian=True).detach()
+                recon_map = recon_map * mask_cls  # keep only the class region; outside is 0
+                return recon_map, mask_cls
+
+            def _phase_reconstruct_map_from_prototype_only(class_id: int, full_shape_hw, mid_slices):
+                """Reconstruct a full feature map from phase/amplitude prototypes only."""
+                if (
+                    full_shape_hw is None
+                    or mid_slices is None
+                    or not phase_replay_active
+                    or not self.phase_bank.has_class(class_id)
+                ):
+                    return None, None
+
+                channels = self.prev_prototypes.shape[1]
+                h, w = full_shape_hw
+                hs, ws = mid_slices
+
+                phase_mid_proto = self.phase_bank.get_phase(class_id)
+                amp_mean_mid, amp_std_mid = self.phase_bank.get_amp_stats(class_id)
+
+                min_norm = self.phase_proto_sampling_min_norm
+                max_trials = self.phase_proto_sampling_max_trials
+                for _ in range(max_trials):
+                    amp_mid_sample = amp_mean_mid + self.phase_proto_amp_scale * amp_std_mid * torch.randn_like(amp_std_mid)
+
+                    amplitude_full = torch.zeros((1, channels, h, w), device=self.device, dtype=amp_mid_sample.dtype)
+                    phase_full = torch.zeros_like(amplitude_full)
+                    amplitude_full[..., hs, ws] = amp_mid_sample.unsqueeze(0)
+                    phase_full[..., hs, ws] = phase_mid_proto.unsqueeze(0)
+
+                    proto_map = reconstruct_feature(amplitude_full, phase_full, enforce_hermitian=True).detach()
+
+                    # Ensure the map isn't degenerate (all~0)
+                    mean_norm = proto_map.flatten(2).norm(p=2, dim=1).mean()
+                    if float(mean_norm) > float(min_norm):
+                        return proto_map, None
+
+                return None, None
 
             mid_slices = None
             pred_small = None
@@ -601,6 +689,143 @@ class Trainer_base(BaseTrainer):
             loss_cont = self.ContLoss(
                 features[-1], logit[:, -self.n_new_classes:], data['label'], self.prev_prototypes)
 
+            # --- Direction C: feature-map replay losses (optional) ---
+            loss_map_total = torch.tensor(0.0, device=self.device)
+            loss_map_distill = torch.tensor(0.0, device=self.device)
+            loss_map_new0 = torch.tensor(0.0, device=self.device)
+            loss_map_grad = torch.tensor(0.0, device=self.device)
+            loss_map_local = torch.tensor(0.0, device=self.device)
+            num_map_replay = torch.tensor(0.0, device=self.device)
+
+            if (
+                self.map_replay_enabled
+                and self.map_replay_num_maps > 0
+                and phase_replay_active
+                and (self.model_old is not None)
+            ):
+                student = _unwrap_model(self.model)
+                teacher = _unwrap_model(self.model_old)
+
+                # Candidate old classes (only those with replay quota and phase prototypes)
+                candidates = []
+                for cls in range(0, self.per_iter_prev_number.shape[0]):
+                    if int(self.per_iter_prev_number[cls].item()) <= 0:
+                        continue
+                    class_id = self.task_info['old_class'][cls] if 'old_class' in self.task_info else cls + 1
+                    if self.phase_bank.has_class(class_id):
+                        candidates.append(int(class_id))
+
+                if candidates:
+                    num_pick = min(self.map_replay_num_maps, len(candidates))
+                    perm = torch.randperm(len(candidates), device=self.device)[:num_pick]
+                    picked = [candidates[int(i)] for i in perm]
+
+                    eps = self.map_replay_eps
+                    conf_thresh = self.map_replay_teacher_conf
+
+                    for class_id in picked:
+                        # Prefer pred-based reconstruction when possible.
+                        proto_map, proto_mask = None, None
+                        if self.map_replay_use_pred_first:
+                            proto_map, proto_mask = _phase_reconstruct_map_from_pred(
+                                class_id, pred_small, features_old_top, mid_slices
+                            )
+                        if proto_map is None:
+                            proto_map, proto_mask = _phase_reconstruct_map_from_prototype_only(
+                                class_id, (h, w) if features_old_top is not None else None, mid_slices
+                            )
+                        if proto_map is None:
+                            continue
+
+                        logits_s_map = student.forward_from_top_feature(proto_map)
+                        with torch.no_grad():
+                            logits_t_map = teacher.forward_from_top_feature(proto_map)
+
+                        c_prev = logits_t_map.shape[1]
+                        if c_prev <= 0:
+                            continue
+
+                        logits_s_old = logits_s_map[:, :c_prev]
+                        p_t_old = torch.sigmoid(logits_t_map)
+
+                        # Teacher confidence mask (optional)
+                        if conf_thresh > 0:
+                            conf = p_t_old.max(dim=1, keepdim=True).values  # [1,1,h,w]
+                            mask = (conf > conf_thresh).float()
+                        else:
+                            mask = torch.ones_like(p_t_old[:, :1])
+
+                        # Distill old-class responses (pixel-wise)
+                        distill_raw = F.binary_cross_entropy_with_logits(logits_s_old, p_t_old, reduction='none')
+                        loss_d = (distill_raw * mask).sum() / (mask.sum() * c_prev + eps)
+
+                        # Suppress new-class channels (pixel-wise)
+                        if self.n_new_classes > 0:
+                            logits_s_new = logits_s_map[:, -self.n_new_classes:]
+                            zeros = torch.zeros_like(logits_s_new)
+                            new0_raw = F.binary_cross_entropy_with_logits(logits_s_new, zeros, reduction='none')
+                            loss_n0 = (new0_raw * mask).sum() / (mask.sum() * self.n_new_classes + eps)
+                        else:
+                            loss_n0 = torch.tensor(0.0, device=self.device)
+
+                        # Gradient consistency on probability maps (optional)
+                        if self.map_replay_w_grad > 0:
+                            p_s_old = torch.sigmoid(logits_s_old)
+                            dx_s = p_s_old[..., :, 1:] - p_s_old[..., :, :-1]
+                            dx_t = p_t_old[..., :, 1:] - p_t_old[..., :, :-1]
+                            dy_s = p_s_old[..., 1:, :] - p_s_old[..., :-1, :]
+                            dy_t = p_t_old[..., 1:, :] - p_t_old[..., :-1, :]
+                            mask_x = mask[..., :, 1:] * mask[..., :, :-1]
+                            mask_y = mask[..., 1:, :] * mask[..., :-1, :]
+                            loss_g = (dx_s - dx_t).abs()
+                            loss_g = (loss_g * mask_x).sum() / (mask_x.sum() * c_prev + eps)
+                            loss_g2 = (dy_s - dy_t).abs()
+                            loss_g2 = (loss_g2 * mask_y).sum() / (mask_y.sum() * c_prev + eps)
+                            loss_g = loss_g + loss_g2
+                        else:
+                            loss_g = torch.tensor(0.0, device=self.device)
+
+                        # Local similarity consistency (optional)
+                        if self.map_replay_w_local > 0:
+                            p_s_old = torch.sigmoid(logits_s_old)
+
+                            def _cos(a, b):
+                                num = (a * b).sum(dim=1)
+                                den = (a.norm(p=2, dim=1) * b.norm(p=2, dim=1)).clamp_min(eps)
+                                return num / den
+
+                            sim_s_x = _cos(p_s_old[..., :, 1:], p_s_old[..., :, :-1])
+                            sim_t_x = _cos(p_t_old[..., :, 1:], p_t_old[..., :, :-1])
+                            sim_s_y = _cos(p_s_old[..., 1:, :], p_s_old[..., :-1, :])
+                            sim_t_y = _cos(p_t_old[..., 1:, :], p_t_old[..., :-1, :])
+                            mask_x2 = mask[..., :, 1:].squeeze(1) * mask[..., :, :-1].squeeze(1)
+                            mask_y2 = mask[..., 1:, :].squeeze(1) * mask[..., :-1, :].squeeze(1)
+                            loss_lx = (sim_s_x - sim_t_x).abs()
+                            loss_lx = (loss_lx * mask_x2).sum() / (mask_x2.sum() + eps)
+                            loss_ly = (sim_s_y - sim_t_y).abs()
+                            loss_ly = (loss_ly * mask_y2).sum() / (mask_y2.sum() + eps)
+                            loss_l = loss_lx + loss_ly
+                        else:
+                            loss_l = torch.tensor(0.0, device=self.device)
+
+                        loss_map_distill = loss_map_distill + loss_d
+                        loss_map_new0 = loss_map_new0 + loss_n0
+                        loss_map_grad = loss_map_grad + loss_g
+                        loss_map_local = loss_map_local + loss_l
+                        num_map_replay = num_map_replay + 1.0
+
+                    if num_map_replay.item() > 0:
+                        loss_map_distill = loss_map_distill / num_map_replay
+                        loss_map_new0 = loss_map_new0 / num_map_replay
+                        loss_map_grad = loss_map_grad / num_map_replay
+                        loss_map_local = loss_map_local / num_map_replay
+                        loss_map_total = (
+                            self.map_replay_w_distill * loss_map_distill
+                            + self.map_replay_w_new0 * loss_map_new0
+                            + self.map_replay_w_grad * loss_map_grad
+                            + self.map_replay_w_local * loss_map_local
+                        )
+
         if update_phase_bank:
             self._update_phase_bank_from_feature(features[-1], data['label'])
 
@@ -609,6 +834,12 @@ class Trainer_base(BaseTrainer):
             'loss_mbce_distill': loss_mbce_distill,
             'loss_pkd': loss_pkd,
             'loss_cont': loss_cont,
+            'loss_map_total': loss_map_total,
+            'loss_map_distill': loss_map_distill,
+            'loss_map_new0': loss_map_new0,
+            'loss_map_grad': loss_map_grad,
+            'loss_map_local': loss_map_local,
+            'num_map_replay': num_map_replay,
             'consistency_ratio': consistency_ratio,
             'loss_mbce_fake_legacy': loss_mbce_fake_legacy,
             'loss_mbce_fake_phase': loss_mbce_fake_phase,
@@ -766,6 +997,7 @@ class Trainer_incremental(Trainer_base):
             'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_bce_distill',
             'loss_old_step', 'consistency_ratio', 'loss_grad',
             'loss_fake_legacy', 'loss_fake_phase', 'num_fake_legacy', 'num_fake_phase',
+            'loss_map', 'loss_map_distill', 'loss_map_new0', 'loss_map_grad', 'loss_map_local', 'num_map_replay',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -916,7 +1148,8 @@ class Trainer_incremental(Trainer_base):
             loss_main = self.mbce_weight * loss_dict['loss_mbce'].sum()
             loss_old = distill_weight * loss_dict['loss_mbce_distill'].sum() \
                        + self.config['hyperparameter']['pkd'] * loss_dict['loss_pkd'].sum() \
-                       + self.config['hyperparameter']['cont'] * loss_dict['loss_cont']
+                       + self.config['hyperparameter']['cont'] * loss_dict['loss_cont'] \
+                       + self.map_replay_weight * loss_dict['loss_map_total']
 
             opt_stepped = False
             if not self.use_separate_old_update:
@@ -938,7 +1171,8 @@ class Trainer_incremental(Trainer_base):
                     data, update_phase_bank=False, return_logit=False)
                 loss_old_step = distill_weight * loss_dict_old['loss_mbce_distill'].sum() \
                                  + self.config['hyperparameter']['pkd'] * loss_dict_old['loss_pkd'].sum() \
-                                 + self.config['hyperparameter']['cont'] * loss_dict_old['loss_cont']
+                                 + self.config['hyperparameter']['cont'] * loss_dict_old['loss_cont'] \
+                                 + self.map_replay_weight * loss_dict_old['loss_map_total']
 
                 if loss_old_step.requires_grad:
                     loss_old_scaled = self.pseudo_grad_scale * loss_old_step
@@ -963,6 +1197,12 @@ class Trainer_incremental(Trainer_base):
                                       loss_dict['loss_mbce_distill'].sum().item() * distill_weight)
             self.train_metrics.update('loss_pkd', loss_dict['loss_pkd'].sum().item() * self.config['hyperparameter']['pkd'])
             self.train_metrics.update('loss_cont', loss_dict['loss_cont'].item() * self.config['hyperparameter']['cont'])
+            self.train_metrics.update('loss_map', loss_dict['loss_map_total'].item() * self.map_replay_weight)
+            self.train_metrics.update('loss_map_distill', loss_dict['loss_map_distill'].item())
+            self.train_metrics.update('loss_map_new0', loss_dict['loss_map_new0'].item())
+            self.train_metrics.update('loss_map_grad', loss_dict['loss_map_grad'].item())
+            self.train_metrics.update('loss_map_local', loss_dict['loss_map_local'].item())
+            self.train_metrics.update('num_map_replay', loss_dict['num_map_replay'].item())
             self.train_metrics.update('loss_fake_legacy', loss_dict['loss_mbce_fake_legacy'].sum().item())
             self.train_metrics.update('loss_fake_phase', loss_dict['loss_mbce_fake_phase'].sum().item())
             self.train_metrics.update('num_fake_legacy', loss_dict['num_fake_legacy'].item())

@@ -43,9 +43,66 @@ def replace_mid(amplitude: torch.Tensor, phase: torch.Tensor, amp_mid: torch.Ten
     return amplitude_full, phase_full
 
 
-def reconstruct_feature(amplitude: torch.Tensor, phase: torch.Tensor) -> torch.Tensor:
+def _enforce_hermitian_unshifted(spectrum: torch.Tensor) -> torch.Tensor:
+    """Enforce Hermitian symmetry on an unshifted 2D spectrum.
+
+    For real-valued spatial signals, the Fourier spectrum should satisfy:
+        S[k] = conj(S[-k])
+    in each frequency dimension (with wrapping).
+
+    This function symmetrizes the complex spectrum to make the inverse FFT
+    produce (approximately) real-valued outputs without discarding the
+    imaginary part ad-hoc.
+
+    Args:
+        spectrum: Complex tensor of shape [..., H, W] in unshifted FFT layout.
+
+    Returns:
+        Complex tensor with enforced Hermitian symmetry.
+    """
+    if not torch.is_complex(spectrum):
+        raise TypeError("spectrum must be a complex tensor")
+
+    H, W = spectrum.shape[-2], spectrum.shape[-1]
+    # Mirror index mapping: (i, j) -> (-i mod H, -j mod W)
+    mirror = spectrum.flip(-2).flip(-1)
+    mirror = torch.roll(mirror, shifts=1, dims=-2)
+    mirror = torch.roll(mirror, shifts=1, dims=-1)
+    spectrum = 0.5 * (spectrum + mirror.conj())
+
+    # Force special frequency bins to be purely real.
+    def _force_real(i: int, j: int):
+        v = spectrum[..., i, j].real
+        spectrum[..., i, j] = torch.complex(v, torch.zeros_like(v))
+
+    _force_real(0, 0)
+    if H % 2 == 0:
+        _force_real(H // 2, 0)
+    if W % 2 == 0:
+        _force_real(0, W // 2)
+    if H % 2 == 0 and W % 2 == 0:
+        _force_real(H // 2, W // 2)
+
+    return spectrum
+
+
+def reconstruct_feature(amplitude: torch.Tensor, phase: torch.Tensor, enforce_hermitian: bool = False) -> torch.Tensor:
+    """Reconstruct spatial features from amplitude/phase.
+
+    Args:
+        amplitude: Real tensor in shifted FFT layout.
+        phase: Real tensor in shifted FFT layout.
+        enforce_hermitian: If True, enforce Hermitian symmetry on the
+            unshifted spectrum before ifft2 (recommended when the spectrum is
+            constructed/edited manually, e.g., phase replay).
+
+    Returns:
+        Real tensor (spatial feature map).
+    """
     spectrum = amplitude * torch.exp(1j * phase)
     spectrum = ifftshift2d(spectrum)
+    if enforce_hermitian:
+        spectrum = _enforce_hermitian_unshifted(spectrum)
     feature = torch.fft.ifft2(spectrum)
     return feature.real
 

@@ -1,6 +1,5 @@
 {
-    "name": "STAR",
-    
+    "name": "phase-append-hardclass",
     "n_gpu": 1,
     "multiprocessing_distributed": false,
     "rank": 0,
@@ -15,7 +14,7 @@
             "output_stride": 16,
             "norm_act": "bn_sync",
             "backbone_pretrained": true,
-            "freeze_all_bn": false
+            "freeze_all_bn": true
         }
     },
     "data_loader": {
@@ -23,7 +22,7 @@
         "args": {
             "task": {
                 "name": "15-1",
-                "step": 0,
+                "step": 5,
                 "setting": "overlap",
                 "idxs_path": "./data/"
             },
@@ -31,11 +30,18 @@
                 "args": {
                     "transform": true,
                     "transform_args": {
-                        "crop_size": 512
+                        "crop_size": 512,
+                        "class_aware_crop": {
+                            "enabled": true,
+                            "min_fg_ratio": 0.03,
+                            "max_old_ratio": 0.1,
+                            "max_trials": 20,
+                            "center_jitter": 64
+                        }
                     },
                     "masking_value": 0
                 },
-                "batch_size": 32
+                "batch_size": 24
             },
             "val": {
                 "cross_val": false,
@@ -61,14 +67,16 @@
             "num_workers": 4,
             "num_workers_override": 12,
             "pin_memory": true,
-            "memory": {"mem_size": 0}
+            "memory": {
+                "mem_size": 0
+            }
         }
     },
     "optimizer": {
         "type": "SGD",
         "args": {
-            "lr": 1e-3,
-            "weight_decay": 1e-4,
+            "lr": 0.0001,
+            "weight_decay": 0.0001,
             "momentum": 0.9,
             "nesterov": true
         }
@@ -89,19 +97,7 @@
         "phase_replay": {
             "enabled": true,
             "mid_ratio": 0.5,
-            "phase_momentum": 0.01,
-            "map_replay": {
-                "enabled": true,
-                "num_maps_per_iter": 2,
-                "weight": 1.0,
-                "w_distill": 1.0,
-                "w_new0": 1.0,
-                "w_grad": 0.0,
-                "w_local": 0.0,
-                "teacher_conf_thresh": 0.0,
-                "use_pred_first": true,
-                "eps": 1e-6
-            }
+            "phase_momentum": 0.01
         },
         "grad_learner": {
             "enabled": false,
@@ -111,7 +107,7 @@
             "alpha": 0.5,
             "eta": 1.0,
             "lambda_fit": 1.0,
-            "epsilon": 1e-6,
+            "epsilon": 1e-06,
             "warmup_epochs": 0,
             "lr": 0.001
         }
@@ -131,13 +127,16 @@
     ],
     "trainer": {
         "epochs": 60,
-        "save_dir": "saved_voc/",
+        "save_dir": "saved_voc",
         "save_period": -1,
         "validation_period": 70,
         "verbosity": 2,
         "monitor": "off",
         "early_stop": -1,
         "reset_best_mnt": false,
-        "tensorboard": false
-    }
+        "tensorboard": false,
+        "validate_on_test": true
+    },
+    "test": false,
+    "info": ""
 }
