@@ -282,9 +282,13 @@ class Trainer_base(BaseTrainer):
                 loss = self.mbce_weight * loss_mbce.sum()
 
             self.scaler.scale(loss).backward()
+
+            scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
-            opt_stepped = True
             self.scaler.update()
+            scale_after = self.scaler.get_scale()
+
+            opt_stepped = (scale_after >= scale_before)
 
             if self.phase_replay_enabled:
                 self._update_phase_bank_from_feature(features[-1], data['label'])
@@ -1155,15 +1159,24 @@ class Trainer_incremental(Trainer_base):
             if not self.use_separate_old_update:
                 loss = loss_main + loss_old
                 self.scaler.scale(loss).backward()
+
+                scale_before = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
-                opt_stepped = True
                 self.scaler.update()
+                scale_after = self.scaler.get_scale()
+
+                opt_stepped = (scale_after >= scale_before)
+
             else:
                 # 主监督更新
                 self.scaler.scale(loss_main).backward()
+
+                scale_before = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
-                opt_stepped = True
                 self.scaler.update()
+                scale_after = self.scaler.get_scale()
+
+                opt_stepped = (scale_after >= scale_before)
 
                 # 独立的旧类伪梯度/蒸馏更新
                 self.optimizer.zero_grad(set_to_none=True)
@@ -1177,9 +1190,14 @@ class Trainer_incremental(Trainer_base):
                 if loss_old_step.requires_grad:
                     loss_old_scaled = self.pseudo_grad_scale * loss_old_step
                     self.scaler.scale(loss_old_scaled).backward()
+
+                    scale_before = self.scaler.get_scale()
                     self.scaler.step(self.optimizer)
-                    opt_stepped = True
                     self.scaler.update()
+                    scale_after = self.scaler.get_scale()
+
+                    opt_stepped = opt_stepped or (scale_after >= scale_before)
+
                 loss_old = loss_old_step
 
             grad_loss = None
