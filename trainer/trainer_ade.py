@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.parallel
+import torch.nn.functional as F
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from base import BaseTrainer
-from utils import MetricTracker, MetricTracker_scalars
+from utils import MetricTracker, MetricTracker_scalars, PhasePrototypeBank
 from models.loss import WBCELoss, PKDLoss, ContLoss
 from data_loader import ADE
 
@@ -45,6 +46,10 @@ class Trainer_base(BaseTrainer):
         self.task_info = task_info
         self.n_old_classes = len(self.task_info['old_class'])  # 0
         self.n_new_classes = len(self.task_info['new_class'])  # 100-50: 100 | 100-10: 100 | 50-50: 50 |
+        self.phase_cfg = config.get('phase_replay', {})
+        self.phase_enabled = self.phase_cfg.get('enabled', False)
+        self.ppb = None
+        self.ppb_inited = False
 
         self.train_loader = data_loader[0]
         if self.train_loader is not None:
@@ -59,6 +64,12 @@ class Trainer_base(BaseTrainer):
             self.do_test = self.test_loader is not None
 
         self.lr_scheduler = lr_scheduler
+
+        cfg_dict = getattr(config, "config", config)
+        self.phase_cfg = cfg_dict.get('phase_replay', {}) if isinstance(cfg_dict, dict) else {}
+        self.phase_enabled = self.phase_cfg.get('enabled', False)
+        self.ppb = None
+        self.ppb_inited = False
 
         # For automatic mixed precision(AMP)
         self.scaler = torch.cuda.amp.GradScaler(enabled=config['use_amp'])
@@ -91,6 +102,56 @@ class Trainer_base(BaseTrainer):
         if not config['test']:
             self.compute_cls_number(self.config)
 
+        self._init_train_id_mapping()
+
+    def _init_train_id_mapping(self):
+        self.train_id_to_class_id = self.task_info['old_class'] + self.task_info['new_class']
+        self.class_id_to_train_id = {
+            class_id: train_id for train_id, class_id in enumerate(self.train_id_to_class_id)
+        }
+        self.train_id_old_classes = [self.class_id_to_train_id[c] for c in self.task_info['old_class']]
+        self.train_id_new_classes = [self.class_id_to_train_id[c] for c in self.task_info['new_class']]
+        self.train_id_old_classes_set = set(self.train_id_old_classes)
+        self.train_id_new_classes_set = set(self.train_id_new_classes)
+        self.ppb_background_id = -1
+        self.ppb_ignore_id = 255
+
+    def _get_model(self):
+        if isinstance(self.model, (nn.DataParallel, DDP)):
+            return self.model.module
+        return self.model
+
+    def _get_head_num_classes(self):
+        model = self._get_model()
+        if hasattr(model, 'cls'):
+            return sum(mod.out_channels for mod in model.cls)
+        raise AttributeError("Model does not expose classifier head via `cls`.")
+
+    def _forward_head(self, x):
+        model = self._get_model()
+        return model.forward_class_prediction(x)
+
+    def maybe_init_ppb(self, feat):
+        if not self.phase_enabled or self.ppb_inited:
+            return
+        feat_shape = tuple(feat.shape[1:])
+        num_classes = self._get_head_num_classes()
+        self.ppb = PhasePrototypeBank(
+            feat_shape=feat_shape,
+            num_classes=num_classes,
+            device=feat.device,
+            **self.phase_cfg,
+        )
+        self.ppb_inited = True
+
+    def _map_label_to_train_id(self, label):
+        mapped = torch.full_like(label, fill_value=self.ppb_ignore_id)
+        mapped[label == 0] = self.ppb_background_id
+        mapped[label == self.ppb_ignore_id] = self.ppb_ignore_id
+        for class_id, train_id in self.class_id_to_train_id.items():
+            mapped[label == class_id] = train_id
+        return mapped
+
     def _print_train_info(self):
         self.logger.info(f"pos_weight - {self.config['hyperparameter']['pos_weight']}")
         self.logger.info(f"Total loss = {self.config['hyperparameter']['mbce']} * L_mbce")
@@ -120,7 +181,11 @@ class Trainer_base(BaseTrainer):
         for batch_idx, data in enumerate(self.train_loader):
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
             with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
-                logit, features, _ = self.model(data['image'], ret_intermediate=False)
+                ret_intermediate = self.phase_enabled
+                logit, features, _ = self.model(data['image'], ret_intermediate=ret_intermediate)
+
+                if self.phase_enabled and isinstance(features, (list, tuple)) and len(features) > 0:
+                    self.maybe_init_ppb(features[-1])
 
                 loss_mbce = self.BCELoss(
                     logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
@@ -309,6 +374,11 @@ class Trainer_incremental(Trainer_base):
         self.BCELoss_extra_bg = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
         self.PKDLoss = PKDLoss()
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
+        self.phase_cfg = config.get('phase_replay', {})
+        self.phase_enabled = self.phase_cfg.get('enabled', False)
+        self.ppb = None
+        self.ppb_inited = False
+        self.replay_loss_fn = nn.CrossEntropyLoss()
 
         # self.pred_numbers = self.compute_pred_number()
 
@@ -472,6 +542,55 @@ class Trainer_incremental(Trainer_base):
                 loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum() \
                        + self.config['hyperparameter']['pkd'] * loss_pkd.sum() \
                        + self.config['hyperparameter']['cont'] * loss_cont
+
+                self.maybe_init_ppb(features[-1])
+                if self.phase_enabled and self.ppb_inited:
+                    feat = features[-1]
+                    label_ds = F.interpolate(
+                        data['label'].unsqueeze(1).float(),
+                        size=feat.shape[2:],
+                        mode='nearest',
+                    ).squeeze(1).long()
+                    label_train_id = self._map_label_to_train_id(label_ds)
+                    with torch.no_grad():
+                        for b in range(feat.shape[0]):
+                            feat_b = feat[b]
+                            uniq = torch.unique(label_train_id[b])
+                            for class_id in uniq:
+                                class_id = int(class_id)
+                                if class_id in {self.ppb_background_id, self.ppb_ignore_id}:
+                                    continue
+                                if class_id not in self.train_id_new_classes_set:
+                                    continue
+                                mask = label_train_id[b] == class_id
+                                self.ppb.update_from_feature(feat_b, mask, class_id)
+
+                    feature_ref = feat.mean(dim=0)
+                    old_classes = self.train_id_old_classes
+                    replay_losses = []
+                    if old_classes:
+                        replay_num_classes = self.phase_cfg.get('replay_num_classes')
+                        if replay_num_classes is not None:
+                            replay_num_classes = min(replay_num_classes, len(old_classes))
+                            perm = torch.randperm(len(old_classes), device=feat.device).tolist()
+                            sampled_old = [old_classes[i] for i in perm[:replay_num_classes]]
+                        else:
+                            sampled_old = old_classes
+                        for class_id in sampled_old:
+                            x_syn = self.ppb.synthesize_from_reference(feature_ref, class_id)
+                            if x_syn is None:
+                                continue
+                            logits_syn = self._forward_head(x_syn.unsqueeze(0))
+                            target = torch.full(
+                                (1, x_syn.shape[1], x_syn.shape[2]),
+                                fill_value=class_id,
+                                dtype=torch.long,
+                                device=logits_syn.device,
+                            )
+                            replay_losses.append(self.replay_loss_fn(logits_syn, target))
+                    if replay_losses:
+                        loss_replay = torch.stack(replay_losses).mean()
+                        loss = loss + self.phase_cfg.get('lambda_replay', 1.0) * loss_replay
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)

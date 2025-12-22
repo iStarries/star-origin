@@ -201,7 +201,11 @@ if __name__ == '__main__':
     args.add_argument('-r', '--resume', default=None, type=str, help='path to latest checkpoint (default: None)')
     args.add_argument('-d', '--device', default=None, type=str, help='indices of GPUs to enable (default: all)')
 
-    CustomArgs = collections.namedtuple('CustomArgs', 'flags type action target', defaults=(None, float, None, None))
+    CustomArgs = collections.namedtuple(
+        'CustomArgs',
+        'flags type action target default choices',
+        defaults=(None, float, None, None, None, None),
+    )
     options = [
         CustomArgs(['--multiprocessing_distributed'], action='store_true', target='multiprocessing_distributed'),
         CustomArgs(['--dist_url'], type=str, target='dist_url'),
@@ -228,6 +232,21 @@ if __name__ == '__main__':
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
         CustomArgs(['--validate'], action='store_true', target='validate'),
+
+        CustomArgs(['--phase_replay'], action='store_true', target='phase_replay;enabled'),
+        CustomArgs(['--phase_lambda'], type=float, target='phase_replay;lambda_replay'),
+        CustomArgs(['--phase_k_old'], type=int, target='phase_replay;k_old'),
+        CustomArgs(['--phase_r_low'], type=float, target='phase_replay;r_low_ratio'),
+        CustomArgs(['--phase_r_high'], type=float, target='phase_replay;r_high_ratio'),
+        CustomArgs(['--phase_beta'], type=float, target='phase_replay;ema_beta'),
+        CustomArgs(['--phase_use_cos_sin'], action='store_true', target='phase_replay;use_cos_sin'),
+        CustomArgs(['--phase_no_cos_sin'], action='store_false', target='phase_replay;use_cos_sin'),
+        CustomArgs(
+            ['--phase_ref_mode'],
+            type=str,
+            target='phase_replay;ref_mode',
+            choices=['random', 'batch_mean'],
+        ),
     ]
     config = ConfigParser.from_args(args, options)
     main(config)

@@ -1,6 +1,6 @@
 {
     "name": "STAR",
-    
+    "test": false,
     "n_gpu": 1,
     "multiprocessing_distributed": false,
     "rank": 0,
@@ -78,6 +78,19 @@
         "mbce": 1,
         "pkd": 5,
         "cont": 0.05
+    },
+    "phase_replay": {
+        "enabled": false,
+        "lambda_replay": 0.1,
+        "k_old": 5,
+        "r_low_ratio": 0.2,
+        "r_high_ratio": 0.6,
+        "ema_beta": 0.01,
+        "use_cos_sin": true,
+        "ref_mode": "batch_mean",
+        "normalize_syn": false,
+        "replay_detach_ref": true,
+        "ppb_filename": "phase_ppb.pth"
     },
     "lr_scheduler": {
         "type": "PolyLR",

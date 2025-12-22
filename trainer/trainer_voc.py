@@ -1,11 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.parallel
+import torch.nn.functional as F
+from pathlib import Path
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from base import BaseTrainer
-from utils import MetricTracker, MetricTracker_scalars
+
 from models.loss import WBCELoss, PKDLoss, ContLoss
+from utils import MetricTracker, MetricTracker_scalars
+
 from data_loader import VOC
 
 class Trainer_base(BaseTrainer):
@@ -60,6 +64,10 @@ class Trainer_base(BaseTrainer):
 
         self.lr_scheduler = lr_scheduler
 
+        self._init_train_id_mapping(self.task_info)
+        self.phase_cfg = self.phase_replay_cfg
+        self.phase_enabled = self.phase_replay_enabled
+
         # For automatic mixed precision(AMP)
         self.scaler = torch.cuda.amp.GradScaler(enabled=config['use_amp'])
 
@@ -91,6 +99,43 @@ class Trainer_base(BaseTrainer):
         if not config['test']:
             self.compute_cls_number(self.config)
 
+
+    def _get_model(self):
+        if isinstance(self.model, (nn.DataParallel, DDP)):
+            return self.model.module
+        return self.model
+
+    def _get_head_num_classes(self):
+        model = self._get_model()
+        if hasattr(model, 'cls'):
+            return sum(mod.out_channels for mod in model.cls)
+        raise AttributeError("Model does not expose classifier head via `cls`.")
+
+    def _forward_head(self, x):
+        model = self._get_model()
+        return model.forward_class_prediction(x)
+
+    # def maybe_init_ppb(self, feat):
+    #     if not self.phase_enabled or self.ppb_inited:
+    #         return
+    #     feat_shape = tuple(feat.shape[1:])
+    #     num_classes = self._get_head_num_classes()
+    #     self.ppb = PhasePrototypeBank(
+    #         feat_shape=feat_shape,
+    #         num_classes=num_classes,
+    #         device=feat.device,
+    #         **self.phase_cfg,
+    #     )
+    #     self.ppb_inited = True
+
+    # def _map_label_to_train_id(self, label):
+    #     mapped = torch.full_like(label, fill_value=self.ppb_ignore_id)
+    #     mapped[label == 0] = self.ppb_background_id
+    #     mapped[label == self.ppb_ignore_id] = self.ppb_ignore_id
+    #     for class_id, train_id in self.class_id_to_train_id.items():
+    #         mapped[label == class_id] = train_id
+    #     return mapped
+
     def _print_train_info(self):
         self.logger.info(f"pos_weight - {self.config['hyperparameter']['pos_weight']}")
         self.logger.info(f"Total loss = {self.config['hyperparameter']['mbce']} * L_mbce")
@@ -102,7 +147,7 @@ class Trainer_base(BaseTrainer):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        torch.distributed.barrier()
+        self._dist_barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -114,18 +159,41 @@ class Trainer_base(BaseTrainer):
         self.logger.info(f'Epoch - {epoch}')
 
         # Random shuffling
-        if not isinstance(self.train_loader.sampler, torch.utils.data.RandomSampler):
+        if hasattr(self.train_loader.sampler, "set_epoch"):
             self.train_loader.sampler.set_epoch(epoch)
         
         for batch_idx, data in enumerate(self.train_loader):
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
             with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
-                logit, features, _ = self.model(data['image'], ret_intermediate=False)
+                ret_intermediate = self.phase_replay_enabled
+                logit, features, _ = self.model(data['image'], ret_intermediate=ret_intermediate)
+
+                self._maybe_init_ppb(logit, features)
 
                 loss_mbce = self.BCELoss(
                     logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
                     data['label'],                # [N, H, W]
                 ).mean(dim=[0, 2, 3])  # [|Ct|]
+
+                if self.phase_replay_enabled and self.ppb is not None and isinstance(features, (list, tuple)) and len(features) > 0:
+                    feat = features[-1]
+                    label_ds = F.interpolate(
+                        data['label'].unsqueeze(1).float(),
+                        size=feat.shape[2:],
+                        mode='nearest',
+                    ).squeeze(1).long()
+                    label_train_id = self._map_label_to_train_id(label_ds)
+                    with torch.no_grad():
+                        for b in range(feat.shape[0]):
+                            feat_b = feat[b]
+                            uniq = torch.unique(label_train_id[b])
+                            for class_id in uniq.tolist():
+                                if class_id < 0:
+                                    continue
+                                if class_id not in self.train_id_new_classes_set:
+                                    continue
+                                mask = label_train_id[b] == class_id
+                                self.ppb.update_from_feature(feat_b, mask, class_id)
 
                 loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum()
 
@@ -165,7 +233,7 @@ class Trainer_base(BaseTrainer):
         return log, val_flag
 
     def _valid_epoch(self, epoch):
-        torch.distributed.barrier()
+        self._dist_barrier()
         
         log = {}
         self.evaluator_val.reset()
@@ -216,7 +284,7 @@ class Trainer_base(BaseTrainer):
         return log
 
     def _test(self, epoch=None):
-        torch.distributed.barrier()
+        self._dist_barrier()
 
         log = {}
         self.evaluator_test.reset()
@@ -309,6 +377,10 @@ class Trainer_incremental(Trainer_base):
         self.PKDLoss = PKDLoss()
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
 
+        self.replay_loss_fn = nn.CrossEntropyLoss()
+
+        self._load_phase_ppb(config)
+
         prev_info_path = \
             str(config.save_dir)[:-len(str(config.save_dir).split('_')[-1])] + \
             str(config['data_loader']['args']['task']['step'] - 1) + \
@@ -341,7 +413,7 @@ class Trainer_incremental(Trainer_base):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        torch.distributed.barrier()
+        self._dist_barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -356,7 +428,7 @@ class Trainer_incremental(Trainer_base):
         self.logger.info(f'Epoch - {epoch}')
 
         # Random shuffling
-        if not isinstance(self.train_loader.sampler, torch.utils.data.RandomSampler):
+        if hasattr(self.train_loader.sampler, "set_epoch"):
             self.train_loader.sampler.set_epoch(epoch)
 
         if epoch == 1:
@@ -427,6 +499,8 @@ class Trainer_incremental(Trainer_base):
                 logits_for_fake = extra[0]
                 logits_for_extra_bg = extra[1]
 
+                self._maybe_init_ppb(logit, features)
+
                 # [|Ct|]
                 loss_mbce_ori = self.BCELoss(
                     logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
@@ -463,6 +537,61 @@ class Trainer_incremental(Trainer_base):
                 loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum() \
                        + self.config['hyperparameter']['pkd'] * loss_pkd.sum() \
                        + self.config['hyperparameter']['cont'] * loss_cont
+
+                if self.phase_replay_enabled and self.ppb is not None:
+                    feat = features[-1]
+                    label_ds = F.interpolate(
+                        data['label'].unsqueeze(1).float(),
+                        size=feat.shape[2:],
+                        mode='nearest',
+                    ).squeeze(1).long()
+                    label_train_id = self._map_label_to_train_id(label_ds)
+                    with torch.no_grad():
+                        for b in range(feat.shape[0]):
+                            feat_b = feat[b]
+                            uniq = torch.unique(label_train_id[b])
+                            for class_id in uniq.tolist():
+                                if class_id < 0:
+                                    continue
+                                if class_id not in self.train_id_new_classes_set:
+                                    continue
+                                mask = label_train_id[b] == class_id
+                                self.ppb.update_from_feature(feat_b, mask, class_id)
+
+                    ref_mode = self.phase_replay_cfg.get('ref_mode', 'batch_mean')
+                    if ref_mode == "random":
+                        b_idx = torch.randint(0, feat.shape[0], (1,), device=feat.device).item()
+                        feature_ref = feat[b_idx]
+                    else:
+                        feature_ref = feat.mean(dim=0)
+
+                    old_classes = list(self.train_id_old_classes)
+                    k_old = self.phase_replay_cfg.get('k_old', 5)
+                    if k_old is not None and len(old_classes) > 0:
+                        k_old = min(k_old, len(old_classes))
+                        perm = torch.randperm(len(old_classes), device=feat.device).tolist()
+                        sampled_old = [old_classes[i] for i in perm[:k_old]]
+                    else:
+                        sampled_old = old_classes
+
+                    replay_losses = []
+                    for class_id in sampled_old:
+                        x_syn = self.ppb.synthesize_from_reference(feature_ref, class_id)
+                        if x_syn is None:
+                            continue
+                        logits_syn = self._forward_head(x_syn.unsqueeze(0))
+                        target = torch.full(
+                            (1, x_syn.shape[1], x_syn.shape[2]),
+                            fill_value=class_id,
+                            dtype=torch.long,
+                            device=logits_syn.device,
+                        )
+                        replay_losses.append(F.cross_entropy(logits_syn, target))
+
+                    if replay_losses:
+                        loss_replay = torch.stack(replay_losses).mean()
+                        lam = self.phase_replay_cfg.get('lambda_replay', 0.1)
+                        loss = loss + lam * loss_replay
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)

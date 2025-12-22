@@ -77,9 +77,15 @@ class ConfigParser:
         """
         for opt in options:
             if opt.action in ['store_true', 'store_false']:
-                args.add_argument(*opt.flags, action=opt.action)
+                args.add_argument(*opt.flags, action=opt.action, default=opt.default)
             else:
-                args.add_argument(*opt.flags, default=None, type=opt.type, action=opt.action)
+                args.add_argument(
+                    *opt.flags,
+                    default=opt.default,
+                    type=opt.type,
+                    action=opt.action,
+                    choices=opt.choices,
+                )
         if not isinstance(args, tuple):
             args = args.parse_args()
 
@@ -146,6 +152,10 @@ class ConfigParser:
     def __getitem__(self, name):
         """Access items like ordinary dict."""
         return self.config[name]
+
+    def get(self, key, default=None):
+        """Dictionary-style accessor for optional keys."""
+        return self.config.get(key, default)
 
     # setting read-only attributes
     @property
