@@ -1,8 +1,6 @@
 import argparse
 import random
 import collections
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,35 +18,11 @@ from utils.parse_config import ConfigParser
 from logger.logger import Logger
 from utils.memory import memory_sampling_balanced
 
-
-def _resolve_prev_checkpoint(save_dir: Path, prev_step: int, epochs: int) -> Path:
-    """Find the previous step checkpoint, handling timestamped run folders and metric suffixes."""
-
-    base_dir = save_dir.parent
-    candidates = sorted(base_dir.glob(f"step_{prev_step}_*/checkpoint-epoch{epochs}*.pth"))
-
-    if not candidates:
-        candidates = sorted((base_dir / f"step_{prev_step}").glob(f"checkpoint-epoch{epochs}*.pth"))
-
-    if not candidates:
-        raise FileNotFoundError(
-            f"No checkpoint found for step {prev_step} under {base_dir} with epoch {epochs}")
-
-    return candidates[-1]
-
 torch.backends.cudnn.benchmark = True
 
 
 def main(config):
-    # Allow a config-only override to avoid repeating --workers/--num_workers on every run
-    workers_override = config.config['data_loader']['args'].pop('num_workers_override', None)
-    if workers_override is not None:
-        config.config['data_loader']['args']['num_workers'] = workers_override
-
     ngpus_per_node = torch.cuda.device_count()
-    # 对齐 VOC 训练脚本的行为：当可用 GPU 数量少于配置数量时直接收缩，避免 BaseTrainer 再次发出警告。
-    if config['n_gpu'] > ngpus_per_node:
-        config.config['n_gpu'] = ngpus_per_node
     if config['multiprocessing_distributed']:
         # Single node, mutliple GPUs
         config.config['world_size'] = ngpus_per_node * config['world_size']
@@ -62,16 +36,13 @@ def main_worker(gpu, ngpus_per_node, config):
     if config['multiprocessing_distributed']:
         config.config['rank'] = config['rank'] * ngpus_per_node + gpu
 
-        dist.init_process_group(
-            backend=config['dist_backend'], init_method=config['dist_url'],
-            world_size=config['world_size'], rank=config['rank']
-        )
-        rank = dist.get_rank()
-    else:
-        rank = 0
-        config.config['rank'] = 0
-
+    dist.init_process_group(
+        backend=config['dist_backend'], init_method=config['dist_url'],
+        world_size=config['world_size'], rank=config['rank']
+    )
+    
     # Set looging
+    rank = dist.get_rank()
     logger = Logger(config.log_dir, rank=rank)
     logger.set_logger(f'train(rank{rank})', verbosity=2)
 
@@ -132,11 +103,11 @@ def main_worker(gpu, ngpus_per_node, config):
     # Convert BN to SyncBN for DDP
     if config['multiprocessing_distributed'] and (config['arch']['args']['norm_act'] == 'bn_sync'):
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    # logger.info(model)
+    logger.info(model)
 
     # Load previous step weights
     if task_step > 0:
-        old_path = _resolve_prev_checkpoint(config.save_dir, task_step - 1, config['trainer']['epochs'])
+        old_path = config.save_dir.parent / f"step_{task_step - 1}" / f"checkpoint-epoch{config['trainer']['epochs']}.pth"
         model._load_pretrained_model(f'{old_path}')
         logger.info(f"Load weights from a previous step:{old_path}")
 
@@ -218,8 +189,7 @@ def main_worker(gpu, ngpus_per_node, config):
         )
 
     logger.print(f"{torch.randint(0, 100, (1, 1))}")
-    if dist.is_available() and dist.is_initialized():
-        torch.distributed.barrier()
+    torch.distributed.barrier()
 
     trainer.train()
     trainer.test()
@@ -249,43 +219,15 @@ if __name__ == '__main__':
         CustomArgs(['--task_name'], type=str, target='data_loader;args;task;name'),
         CustomArgs(['--task_step'], type=int, target='data_loader;args;task;step'),
         CustomArgs(['--task_setting'], type=str, target='data_loader;args;task;setting'),
-        CustomArgs(['--workers', '--num_workers'], type=int, target='data_loader;args;num_workers'),
 
         CustomArgs(['--pos_weight'], type=float, target='hyperparameter;pos_weight'),
         CustomArgs(['--mbce'], type=float, target='hyperparameter;mbce'),
         CustomArgs(['--kd'], type=float, target='hyperparameter;kd'),
         CustomArgs(['--ac'], type=float, target='hyperparameter;ac'),
-        CustomArgs(['--enable_mbce_distill'], action='store_true', target='hyperparameter;enable_mbce_distill'),
-        CustomArgs(['--distill_bg_only'], action='store_true', target='hyperparameter;distill_bg_only'),
-        CustomArgs(['--use_consistency_filter'], action='store_true', target='hyperparameter;use_consistency_filter'),
-        CustomArgs(['--consistency_old_thresh'], type=float, target='hyperparameter;consistency_old_thresh'),
-        CustomArgs(['--consistency_curr_thresh'], type=float, target='hyperparameter;consistency_curr_thresh'),
-        CustomArgs(['--use_separate_old_update'], action='store_true', target='hyperparameter;use_separate_old_update'),
-        CustomArgs(['--pseudo_grad_scale'], type=float, target='hyperparameter;pseudo_grad_scale'),
-
-        # Gradient learner toggles
-        CustomArgs(['--grad'], action='store_true', target='hyperparameter;grad_learner;enabled'),
-        CustomArgs(['--grad_hidden'], type=int, target='hyperparameter;grad_learner;hidden_dim'),
-        CustomArgs(['--grad_layers'], type=int, target='hyperparameter;grad_learner;num_layers'),
-        CustomArgs(['--grad_samples'], type=int, target='hyperparameter;grad_learner;sample_pixels'),
-        CustomArgs(['--grad_alpha'], type=float, target='hyperparameter;grad_learner;alpha'),
-        CustomArgs(['--grad_eta'], type=float, target='hyperparameter;grad_learner;eta'),
-        CustomArgs(['--grad_lambda'], type=float, target='hyperparameter;grad_learner;lambda_fit'),
-        CustomArgs(['--grad_eps'], type=float, target='hyperparameter;grad_learner;epsilon'),
-        CustomArgs(['--grad_warmup'], type=int, target='hyperparameter;grad_learner;warmup_epochs'),
-        CustomArgs(['--grad_lr'], type=float, target='hyperparameter;grad_learner;lr'),
-
-        # Phase replay controls
-        CustomArgs(['--phase_replay'], action='store_true', target='hyperparameter;phase_replay;enabled'),
-        CustomArgs(['--phase_mid_ratio'], type=float, target='hyperparameter;phase_replay;mid_ratio'),
-        CustomArgs(['--phase_momentum'], type=float, target='hyperparameter;phase_replay;phase_momentum'),
-
-        # 验证/测试评估控制：开启后在末尾若干 epoch 上跑测试集
-        CustomArgs(['--validate'], action='store_true', target='trainer;validate_on_test'),
-        CustomArgs(['--validate_tail_epochs'], type=int, target='trainer;validate_tail_epochs'),
 
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
+        CustomArgs(['--validate'], action='store_true', target='validate'),
     ]
     config = ConfigParser.from_args(args, options)
     main(config)

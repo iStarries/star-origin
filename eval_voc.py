@@ -1,11 +1,3 @@
-'''
-CUDA_VISIBLE_DEVICES=0 python eval_voc.py \
-  -c /media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_1/config.json \
-  -r /media/wyh/star/saved_voc/models/overlap_15-5_STAR/step_1/checkpoint-epoch60.pth \
-  --device 0 --test --info 'test-bs24-epochs80'
-
-'''
-
 import argparse
 import random
 import collections
@@ -15,13 +7,11 @@ import torch.nn as nn
 import torch.utils.data
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.utils.data.distributed import DistributedSampler
 
 import models.model as module_arch
 import utils.metric as module_metric
-import utils.lr_scheduler as module_lr_scheduler
 import data_loader.data_loaders as module_data
-from trainer.trainer_voc import Trainer_base, Trainer_incremental
+from trainer.trainer_voc import Trainer_base
 from utils.parse_config import ConfigParser
 from logger.logger import Logger
 
@@ -42,16 +32,14 @@ def main(config):
 def main_worker(gpu, ngpus_per_node, config):
     if config['multiprocessing_distributed']:
         config.config['rank'] = config['rank'] * ngpus_per_node + gpu
-        dist.init_process_group(
-            backend=config['dist_backend'], init_method=config['dist_url'],
-            world_size=config['world_size'], rank=config['rank']
-        )
-        rank = dist.get_rank()
-    else:
-        rank = 0
-        config.config['rank'] = 0
 
+    dist.init_process_group(
+        backend=config['dist_backend'], init_method=config['dist_url'],
+        world_size=config['world_size'], rank=config['rank']
+    )
+    
     # Set looging
+    rank = dist.get_rank()
     logger = Logger(config.log_dir, rank=rank)
     logger.set_logger(f'train(rank{rank})', verbosity=2)
 
@@ -88,7 +76,7 @@ def main_worker(gpu, ngpus_per_node, config):
     # Convert BN to SyncBN
     if config['multiprocessing_distributed'] and (config['arch']['args']['norm_act'] == 'bn_sync'):
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    # logger.info(model)
+    logger.info(model)
 
     evaluator_test = config.init_obj(
         'evaluator',
@@ -107,8 +95,7 @@ def main_worker(gpu, ngpus_per_node, config):
         logger=logger, gpu=gpu,
     )
 
-    if dist.is_available() and dist.is_initialized():
-        torch.distributed.barrier()
+    torch.distributed.barrier()
     trainer.test()
 
 

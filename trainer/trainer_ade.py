@@ -1,23 +1,12 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.nn.parallel
-from pathlib import Path
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from base import BaseTrainer
 from utils import MetricTracker, MetricTracker_scalars
-from models.loss import BCELoss, WBCELoss, PKDLoss, ContLoss
-from models.gradient_learner import GradientLearner
+from models.loss import WBCELoss, PKDLoss, ContLoss
 from data_loader import ADE
-from utils.prototype_bank import PhasePrototypeBank
-from utils.fft_utils import (
-    decompose_spectrum,
-    extract_mid,
-    get_mid_slices,
-    reconstruct_feature,
-    replace_mid,
-)
 
 class Trainer_base(BaseTrainer):
     """
@@ -70,39 +59,9 @@ class Trainer_base(BaseTrainer):
             self.do_test = self.test_loader is not None
 
         self.lr_scheduler = lr_scheduler
+
         # For automatic mixed precision(AMP)
         self.scaler = torch.cuda.amp.GradScaler(enabled=config['use_amp'])
-
-        self.grad_cfg = self.config['hyperparameter'].get('grad_learner', {})
-        self.grad_enabled = self.grad_cfg.get('enabled', False)
-        self.grad_warmup = self.grad_cfg.get('warmup_epochs', 0)
-        self.grad_lambda = self.grad_cfg.get('lambda_fit', 1.0)
-        self.grad_alpha = self.grad_cfg.get('alpha', 0.5)
-        self.grad_eta = self.grad_cfg.get('eta', 1.0)
-        self.grad_epsilon = self.grad_cfg.get('epsilon', 1e-6)
-        self.grad_sample_pixels = self.grad_cfg.get('sample_pixels', 256)
-
-        if self.grad_enabled:
-            grad_input_dim = self.model.module.tot_classes if isinstance(self.model, (nn.DataParallel, DDP)) else self.model.tot_classes
-            grad_hidden = self.grad_cfg.get('hidden_dim', 64)
-            grad_layers = self.grad_cfg.get('num_layers', 2)
-
-            grad_net = GradientLearner(grad_input_dim, hidden_dim=grad_hidden, num_layers=grad_layers)
-            grad_net = grad_net.to(self.device)
-
-            if self.config['multiprocessing_distributed']:
-                if gpu is not None:
-                    self.grad_learner = DDP(grad_net, device_ids=[gpu])
-                else:
-                    self.grad_learner = DDP(grad_net)
-            else:
-                self.grad_learner = nn.DataParallel(grad_net, device_ids=self.device_ids)
-
-            grad_lr = self.grad_cfg.get('lr', self.config['optimizer']['args']['lr'])
-            self.grad_optimizer = torch.optim.Adam(self.grad_learner.parameters(), lr=grad_lr)
-        else:
-            self.grad_learner = None
-            self.grad_optimizer = None
 
         if self.evaluator_val is not None:
             self.metric_ftns_val = [getattr(self.evaluator_val, met) for met in config['metrics']]
@@ -110,7 +69,7 @@ class Trainer_base(BaseTrainer):
             self.metric_ftns_test = [getattr(self.evaluator_test, met) for met in config['metrics']]
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce', 'loss_grad',
+            'loss', 'loss_mbce',
             writer=self.writer,
             colums=['total', 'counts', 'average'],
         )
@@ -124,21 +83,6 @@ class Trainer_base(BaseTrainer):
             [len(self.task_info['new_class'])], device=self.device) * self.config['hyperparameter']['pos_weight']
         self.BCELoss = WBCELoss(
             pos_weight=pos_weight, n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
-        self.enable_mbce_distill = self.config['hyperparameter'].get('enable_mbce_distill', False)
-        self.distill_bg_only = self.config['hyperparameter'].get('distill_bg_only', False)
-        self.DistillBCELoss = BCELoss(reduction='none', distill_bg_only=self.distill_bg_only)
-
-        self.mbce_weight = self.config['hyperparameter']['mbce']
-        self.mbce_distill_weight = self.config['hyperparameter'].get('mbce_distill', self.mbce_weight)
-
-        phase_cfg = self.config['hyperparameter'].get('phase_replay', {})
-        self.phase_replay_enabled = phase_cfg.get('enabled', False)
-        if self.phase_replay_enabled:
-            self.phase_bank = PhasePrototypeBank(
-                mid_ratio=phase_cfg.get('mid_ratio', 0.5),
-                momentum=phase_cfg.get('phase_momentum', 0.01),
-                device=self.device,
-            )
 
         self._print_train_info()
 
@@ -149,79 +93,7 @@ class Trainer_base(BaseTrainer):
 
     def _print_train_info(self):
         self.logger.info(f"pos_weight - {self.config['hyperparameter']['pos_weight']}")
-        self.logger.info(f"Total loss = {self.mbce_weight} * L_mbce")
-        if self.enable_mbce_distill:
-            self.logger.info(
-                f"          + {self.mbce_distill_weight} * L_mbce_distill"
-                f" (bg_only={self.distill_bg_only})")
-        else:
-            self.logger.info("          + 0 * L_mbce_distill (disabled)")
-        if self.grad_enabled:
-            self.logger.info(
-                f"Gradient learner enabled: hidden_dim={self.grad_cfg.get('hidden_dim', 64)}, "
-                f"sample_pixels={self.grad_sample_pixels}, alpha={self.grad_alpha}, "
-                f"eta={self.grad_eta}, lambda_fit={self.grad_lambda}, warmup={self.grad_warmup}")
-        else:
-            self.logger.info("Gradient learner disabled")
-
-    def _update_phase_bank_from_feature(self, feature, label):
-        if not self.phase_replay_enabled or self.phase_bank is None:
-            return
-
-        with torch.no_grad():
-            small_label = F.interpolate(
-                label.unsqueeze(1).float(), size=feature.shape[-2:], mode="nearest"
-            ).squeeze(1).long()
-
-            for cls_idx in torch.unique(small_label):
-                if cls_idx <= 0:
-                    continue
-                mask = (small_label == int(cls_idx)).float().unsqueeze(1)
-                if mask.sum() == 0:
-                    continue
-                masked_feature = feature * mask
-                self.phase_bank.update_from_masked_feature(masked_feature, int(cls_idx))
-
-    def _train_gradient_learner(self, logit, label):
-        """Train gradient learner on trusted foreground pixels only."""
-        if self.grad_learner is None or self.grad_optimizer is None:
-            return None
-
-        with torch.no_grad():
-            mask_fg = (label != 0) & (label != 255)
-            flat_mask = mask_fg.view(-1)
-            valid_indices = flat_mask.nonzero(as_tuple=False).squeeze(1)
-
-        if valid_indices.numel() == 0:
-            return None
-
-        sample_num = min(self.grad_sample_pixels, valid_indices.numel())
-        perm = torch.randperm(valid_indices.numel(), device=valid_indices.device)[:sample_num]
-        chosen = valid_indices[perm]
-
-        logit_flat = logit.permute(0, 2, 3, 1).reshape(-1, logit.shape[1])
-        label_flat = label.view(-1)
-
-        z_fg = logit_flat[chosen].detach().requires_grad_(True)
-        y_fg = label_flat[chosen] - 1
-
-        fg_loss = F.cross_entropy(z_fg, y_fg, reduction='mean')
-        g_true = torch.autograd.grad(fg_loss, z_fg, retain_graph=False)[0]
-
-        tau = g_true.norm(p=2, dim=1, keepdim=True)
-
-        pred_grad = self.grad_learner(z_fg.detach())
-        pred_norm = pred_grad.norm(p=2, dim=1, keepdim=True)
-        scaled_grad = self.grad_alpha * tau * pred_grad / (pred_norm + self.grad_epsilon)
-
-        z_prime = z_fg.detach() - self.grad_eta * scaled_grad
-        fit_loss = self.grad_lambda * F.cross_entropy(z_prime, y_fg, reduction='mean')
-
-        self.grad_optimizer.zero_grad(set_to_none=True)
-        fit_loss.backward()
-        self.grad_optimizer.step()
-
-        return fit_loss.item()
+        self.logger.info(f"Total loss = {self.config['hyperparameter']['mbce']} * L_mbce")
 
     def _train_epoch(self, epoch):
         """
@@ -230,8 +102,7 @@ class Trainer_base(BaseTrainer):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        torch.distributed.barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -245,49 +116,35 @@ class Trainer_base(BaseTrainer):
         # Random shuffling
         if not isinstance(self.train_loader.sampler, torch.utils.data.RandomSampler):
             self.train_loader.sampler.set_epoch(epoch)
-
+        
         for batch_idx, data in enumerate(self.train_loader):
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
-            opt_stepped = False
             with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
-                ret_intermediate = self.phase_replay_enabled
-                logit, features, _ = self.model(data['image'], ret_intermediate=ret_intermediate)
+                logit, features, _ = self.model(data['image'], ret_intermediate=False)
 
                 loss_mbce = self.BCELoss(
                     logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
                     data['label'],                # [N, H, W]
                 ).mean(dim=[0, 2, 3])  # [|Ct|]
 
-                loss = self.mbce_weight * loss_mbce.sum()
+                loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum()
 
-            step_before = getattr(self.optimizer, "_step_count", 0)
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            step_after = getattr(self.optimizer, "_step_count", 0)
-            opt_stepped = step_after > step_before
-
-            if self.phase_replay_enabled:
-                self._update_phase_bank_from_feature(features[-1], data['label'])
 
             self.optimizer.zero_grad(set_to_none=True)
-
-            grad_loss = None
-            if self.grad_enabled and (epoch > self.grad_warmup):
-                grad_loss = self._train_gradient_learner(logit.detach(), data['label'])
-
+            
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
             self.train_metrics.update('loss', loss.item())
             self.train_metrics.update('loss_mbce', loss_mbce.sum().item())
-            if grad_loss is not None:
-                self.train_metrics.update('loss_grad', grad_loss)
 
             # Get First lr
             if batch_idx == 0:
                 self.writer.add_scalars('lr', {'lr': self.optimizer.param_groups[0]['lr']}, epoch - 1)
                 self.logger.info(f"lr[0]: {self.optimizer.param_groups[0]['lr']:.6f} / lr[1]: {self.optimizer.param_groups[1]['lr']:.6f} / lr[2]: {self.optimizer.param_groups[2]['lr']:.6f}")
 
-            if self.lr_scheduler is not None and opt_stepped and getattr(self.optimizer, "_step_count", 0) > 0:
+            if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
 
             self.progress(self.logger, batch_idx, len(self.train_loader))
@@ -308,8 +165,7 @@ class Trainer_base(BaseTrainer):
         return log, val_flag
 
     def _valid_epoch(self, epoch):
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        torch.distributed.barrier()
         
         log = {}
         self.evaluator_val.reset()
@@ -342,13 +198,13 @@ class Trainer_base(BaseTrainer):
                     self.valid_metrics.update(met.__name__, [met()['overall']], 'overall', n=1)
 
                 if 'old' in met().keys():
-                    log.update({met.__name__ + '_old': met()['old']})
+                    log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
                 if 'new' in met().keys():
-                    log.update({met.__name__ + '_new': met()['new']})
+                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
                 if 'harmonic' in met().keys():
-                    log.update({met.__name__ + '_harmonic': met()['harmonic']})
+                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
                 if 'overall' in met().keys():
-                    log.update({met.__name__ + '_overall': met()['overall']})
+                    log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
                 if 'by_class' in met().keys():
                     by_class_str = '\n'
                     for i in range(len(met()['by_class'])):
@@ -359,12 +215,10 @@ class Trainer_base(BaseTrainer):
                     log.update({met.__name__ + '_by_class': by_class_str})
         return log
 
-    def _test(self, epoch=None, return_metrics=False):
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
+    def _test(self, epoch=None):
+        torch.distributed.barrier()
 
         log = {}
-        raw_metrics = {} if return_metrics else None
         self.evaluator_test.reset()
         self.logger.info(f"Number of test loader: {len(self.test_loader)}")
 
@@ -394,34 +248,28 @@ class Trainer_base(BaseTrainer):
                     self.writer.set_step((epoch), 'test')
 
             for met in self.metric_ftns_test:
-                met_result = met()
-                if return_metrics:
-                    raw_metrics[met.__name__] = met_result
-
                 if epoch is not None:
-                    if len(met_result.keys()) > 2:
-                        self.test_metrics.update(met.__name__, [met_result['old'], met_result['new'], met_result['harmonic']], 'old', 'new', 'harmonic', n=1)
+                    if len(met().keys()) > 2:
+                        self.test_metrics.update(met.__name__, [met()['old'], met()['new'], met()['harmonic']], 'old', 'new', 'harmonic', n=1)
                     else:
-                        self.test_metrics.update(met.__name__, [met_result['overall']], 'overall', n=1)
+                        self.test_metrics.update(met.__name__, [met()['overall']], 'overall', n=1)
 
-                if 'old' in met_result.keys():
-                    log.update({met.__name__ + '_old': f"{met_result['old']:.2f}"})
-                if 'new' in met_result.keys():
-                    log.update({met.__name__ + '_new': met_result['new']})
-                if 'harmonic' in met_result.keys():
-                    log.update({met.__name__ + '_harmonic': met_result['harmonic']})
-                if 'overall' in met_result.keys():
-                    log.update({met.__name__ + '_overall': f"{met_result['overall']:.2f}"})
-                if 'by_class' in met_result.keys():
+                if 'old' in met().keys():
+                    log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
+                if 'new' in met().keys():
+                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
+                if 'harmonic' in met().keys():
+                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
+                if 'overall' in met().keys():
+                    log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
+                if 'by_class' in met().keys():
                     by_class_str = '\n'
-                    for i in range(len(met_result['by_class'])):
+                    for i in range(len(met()['by_class'])):
                         if i in self.evaluator_test.new_classes_idx:
-                            by_class_str = by_class_str + f"{i:2d} *{ADE[i]} {met_result['by_class'][i]:.2f}\n"
+                            by_class_str = by_class_str + f"{i:2d} *{ADE[i]} {met()['by_class'][i]:.2f}\n"
                         else:
-                            by_class_str = by_class_str + f"{i:2d}  {ADE[i]} {met_result['by_class'][i]:.2f}\n"
+                            by_class_str = by_class_str + f"{i:2d}  {ADE[i]} {met()['by_class'][i]:.2f}\n"
                     log.update({met.__name__ + '_by_class': by_class_str})
-        if return_metrics:
-            return log, raw_metrics
         return log
 
 
@@ -451,8 +299,7 @@ class Trainer_incremental(Trainer_base):
                 self.model_old = nn.DataParallel(model_old, device_ids=self.device_ids)
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_bce_distill',
-            'loss_old_step', 'consistency_ratio', 'loss_grad',
+            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -460,40 +307,21 @@ class Trainer_incremental(Trainer_base):
 
         self.BCELoss_fake = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
         self.BCELoss_extra_bg = WBCELoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
-        self.DistillBCELoss = BCELoss(reduction='none')
         self.PKDLoss = PKDLoss()
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
 
-        hp = self.config['hyperparameter']
-        self.use_consistency_filter = hp.get('use_consistency_filter', False)
-        self.consistency_old_thresh = hp.get('consistency_old_thresh', 0.0)
-        self.consistency_curr_thresh = hp.get('consistency_curr_thresh', 0.0)
-        self.use_separate_old_update = hp.get('use_separate_old_update', False)
-        self.pseudo_grad_scale = hp.get('pseudo_grad_scale', 1.0)
-
         # self.pred_numbers = self.compute_pred_number()
 
-        prev_info_path = self._resolve_prev_info_path(config)
+        prev_info_path = \
+            str(config.save_dir)[:-1] + \
+            str(config['data_loader']['args']['task']['step'] - 1) + \
+            "/prototypes-epoch{}.pth".format(config['trainer']['epochs'])
 
         prev_info = torch.load(prev_info_path)
         self.prev_numbers = prev_info['numbers'].to(self.device)
         self.prev_prototypes = prev_info['prototypes'].to(self.device)
         self.prev_norm = prev_info['norm_mean_and_std'].to(self.device)
         self.prev_noise = prev_info['noise'].to(self.device)
-
-        phase_cfg = self.config['hyperparameter'].get('phase_replay', {})
-        self.phase_replay_enabled = phase_cfg.get('enabled', False)
-        if self.phase_replay_enabled:
-            self.phase_bank = PhasePrototypeBank(
-                mid_ratio=phase_cfg.get('mid_ratio', 0.5),
-                momentum=phase_cfg.get('phase_momentum', 0.01),
-                device=self.device,
-            )
-            prev_phase_state = prev_info.get('phase_bank', None)
-            if prev_phase_state is not None:
-                self.phase_bank.load_state_dict(prev_phase_state, map_location=self.device)
-        else:
-            self.phase_bank = None
 
         self.current_numbers = self.numbers[1:].sum()
         # self.per_iter_prev_number = (self.prev_numbers[1:] / len(self.train_loader)).to(torch.int)
@@ -505,192 +333,12 @@ class Trainer_incremental(Trainer_base):
         else:
             self.prev_bg_number = self.prev_numbers[0]
 
-    def _resolve_prev_info_path(self, config):
-        prev_step = config['data_loader']['args']['task']['step'] - 1
-        prev_dir_candidates = sorted(Path(config.save_dir).parent.glob(f"step_{prev_step}_*"))
-
-        if prev_dir_candidates:
-            prev_dir = prev_dir_candidates[-1]
-        else:
-            prev_dir = Path(config.save_dir).parent / f"step_{prev_step}"
-
-        return prev_dir / f"prototypes-epoch{config['trainer']['epochs']}.pth"
-
         # self.prev_numbers = self.prev_numbers[1:]
 
     def _print_train_info(self):
         self.logger.info(f"pos_weight - {self.config['hyperparameter']['pos_weight']}")
         self.logger.info(f"Total loss = {self.config['hyperparameter']['mbce']} * L_mbce + "
                          f"{self.config['hyperparameter']['pkd']} * L_pkd")
-
-    def _forward_loss_pass(self, data, update_phase_bank=True, return_logit=False):
-        with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
-            if self.model_old is not None:
-                with torch.no_grad():
-                    logit_old, features_old, _ = self.model_old(data['image'], ret_intermediate=True)
-
-                    pred = logit_old.argmax(dim=1) + 1
-                    idx = (logit_old > 0.5).float()
-                    idx = idx.sum(dim=1)
-                    pred[idx == 0] = 0
-                    pseudo_label_region_base = torch.logical_and(
-                        data['label'] == 0, pred > 0
-                    ).unsqueeze(1)
-            else:
-                logit_old, features_old = None, None
-                pseudo_label_region_base = torch.zeros_like(data['label'], dtype=torch.bool).unsqueeze(1)
-
-            def _legacy_fake_feature(cls_idx, num_samples: int):
-                base = self.prev_prototypes[cls_idx].reshape(1, -1, 1, 1)
-                per_cls_fake = base.repeat(1, 1, num_samples, 1)
-                noise = torch.randn_like(per_cls_fake) * self.prev_noise[cls_idx].reshape(1, -1, 1, 1)
-                per_cls_fake = per_cls_fake + noise
-                rand_norm = (
-                    torch.randn_like(per_cls_fake) * self.prev_norm[1, cls_idx].reshape(1, 1, 1, 1)
-                    + self.prev_norm[0, cls_idx].reshape(1, 1, 1, 1)
-                )
-                return per_cls_fake * rand_norm
-
-            fake_features = []
-            phase_replay_active = (
-                self.phase_replay_enabled
-                and self.phase_bank is not None
-                and features_old is not None
-            )
-            mid_slices = None
-            pred_small = None
-            if phase_replay_active:
-                _, _, h, w = features_old[-1].shape
-                mid_slices = get_mid_slices(h, w, self.phase_bank.mid_ratio)
-                pred_small = (
-                    F.interpolate(pred.unsqueeze(1).float(), size=(h, w), mode="nearest")
-                    .squeeze(1)
-                    .long()
-                )
-
-            for cls in range(0, self.per_iter_prev_number.shape[0]):
-                num_samples = int(self.per_iter_prev_number[cls].item())
-                if num_samples == 0:
-                    fake_features.append(torch.empty(1, self.prev_prototypes.shape[1], 0, 1, device=self.device))
-                    continue
-
-                per_cls_fake_features = None
-                class_id = self.task_info['old_class'][cls] if 'old_class' in self.task_info else cls + 1
-
-                if phase_replay_active and self.phase_bank.has_class(class_id):
-                    mask_cls = (pred_small == class_id).float().unsqueeze(1)
-                    if mask_cls.sum() > 0:
-                        masked_feature = features_old[-1] * mask_cls
-                        amplitude, phase = decompose_spectrum(masked_feature)
-                        amp_mid, _ = extract_mid(amplitude, phase, mid_slices)
-
-                        phase_mid_proto = self.phase_bank.get_phase(class_id).unsqueeze(0).expand_as(amp_mid)
-                        amp_repl, phase_repl = replace_mid(amplitude, phase, amp_mid, phase_mid_proto, mid_slices)
-                        recon_feature = reconstruct_feature(amp_repl, phase_repl).detach() * mask_cls
-
-                        flat_feature = recon_feature.permute(0, 2, 3, 1).reshape(-1, recon_feature.shape[1])
-                        flat_mask = mask_cls.view(-1) > 0
-                        selected = flat_feature[flat_mask]
-
-                        if selected.shape[0] > 0:
-                            if selected.shape[0] >= num_samples:
-                                idx = torch.randperm(selected.shape[0], device=selected.device)[:num_samples]
-                            else:
-                                idx = torch.randint(0, selected.shape[0], (num_samples,), device=selected.device)
-                            chosen = selected[idx]
-                            per_cls_fake_features = chosen.transpose(0, 1).unsqueeze(0).unsqueeze(-1)
-
-                if per_cls_fake_features is None:
-                    per_cls_fake_features = _legacy_fake_feature(cls, num_samples)
-
-                fake_features.append(per_cls_fake_features)
-
-            fake_features = torch.cat(fake_features, dim=2)
-            fake_label = torch.zeros(1, fake_features.shape[2], 1, requires_grad=False).to(self.device)
-
-            if self.model_old is not None:
-                region_bg = torch.logical_and(pred == 0, data['label'] == 0)[:, 8::16, 8::16]
-            else:
-                region_bg = torch.zeros_like(data['label'][:, 8::16, 8::16], dtype=torch.bool)
-
-            logit, features, extra = \
-                self.model(data['image'], ret_intermediate=True, fake_features=fake_features, region_bg=region_bg)
-            logits_for_fake = extra[0]
-            logits_for_extra_bg = extra[1]
-
-            if self.use_consistency_filter and (logit_old is not None):
-                with torch.no_grad():
-                    old_prob = torch.sigmoid(logit_old)
-                    old_conf, old_pred = old_prob.max(dim=1)
-
-                current_prob = torch.sigmoid(logit.detach())
-                curr_conf, curr_pred = current_prob.max(dim=1)
-                consistency_mask = (old_pred == curr_pred) & \
-                    (old_conf > self.consistency_old_thresh) & \
-                    (curr_conf > self.consistency_curr_thresh)
-
-                pseudo_label_region = pseudo_label_region_base & consistency_mask.unsqueeze(1)
-                kept = pseudo_label_region.sum()
-                total = pseudo_label_region_base.sum() + 1e-6
-                consistency_ratio = (kept / total).detach()
-            else:
-                pseudo_label_region = pseudo_label_region_base
-                consistency_ratio = torch.tensor(1.0, device=self.device)
-
-            loss_mbce_ori = self.BCELoss(
-                logit[:, -self.n_new_classes:],
-                data['label'],
-            ).mean(dim=[0, 2, 3])
-
-            if logits_for_extra_bg is not None:
-                extra_bg_label = torch.zeros(1, logits_for_extra_bg.shape[2], 1, requires_grad=False).to(self.device)
-                loss_mbce_extra_bg = self.BCELoss_extra_bg(
-                    logits_for_extra_bg[:, -self.n_new_classes:],
-                    extra_bg_label,
-                ).mean(dim=[0, 2, 3])
-            else:
-                loss_mbce_extra_bg = torch.zeros_like(loss_mbce_ori)
-
-            loss_mbce_fake = self.BCELoss_fake(
-                logits_for_fake[:, -self.n_new_classes:],
-                fake_label
-            ).mean(dim=[0, 2, 3])
-
-            stride_num = features[-1].shape[0] * features[-1].shape[2] * features[-1].shape[3]
-            weight_extra_bg = self.extra_bg_ratio * region_bg.sum() / stride_num
-            weight_fake = fake_label.shape[1] / stride_num
-
-            loss_mbce = loss_mbce_ori + loss_mbce_fake * weight_fake + loss_mbce_extra_bg * weight_extra_bg
-            loss_mbce = loss_mbce / (1 + weight_extra_bg + weight_fake)
-
-            if self.enable_mbce_distill and logit_old is not None:
-                loss_mbce_distill = self.DistillBCELoss(
-                    logit, data['label'], logit_old).mean(dim=[0, 2, 3])
-            else:
-                loss_mbce_distill = torch.zeros_like(loss_mbce)
-
-            if features_old is not None and pseudo_label_region.sum() > 0:
-                loss_pkd = self.PKDLoss(features, features_old, pseudo_label_region.to(torch.float32))
-            else:
-                loss_pkd = torch.tensor(0.0, device=self.device)
-
-            loss_cont = self.ContLoss(
-                features[-1], logit[:, -self.n_new_classes:], data['label'], self.prev_prototypes)
-
-        if update_phase_bank:
-            self._update_phase_bank_from_feature(features[-1], data['label'])
-
-        loss_dict = {
-            'loss_mbce': loss_mbce,
-            'loss_mbce_distill': loss_mbce_distill,
-            'loss_pkd': loss_pkd,
-            'loss_cont': loss_cont,
-            'consistency_ratio': consistency_ratio,
-        }
-
-        if return_logit:
-            return loss_dict, logit.detach()
-        return loss_dict
 
     def _train_epoch(self, epoch):
         """
@@ -699,8 +347,7 @@ class Trainer_incremental(Trainer_base):
         :param epoch: Integer, current training epoch.
         :return: A log that contains average loss and metric in this epoch.
         """
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        torch.distributed.barrier()
 
         self.model.train()
         if isinstance(self.model, (nn.DataParallel, DDP)):
@@ -753,78 +400,96 @@ class Trainer_incremental(Trainer_base):
         for batch_idx, data in enumerate(self.train_loader):
             self.optimizer.zero_grad(set_to_none=True)
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
-            return_logit = self.grad_enabled and (epoch > self.grad_warmup)
-            loss_out = self._forward_loss_pass(
-                data, update_phase_bank=self.phase_replay_enabled, return_logit=return_logit)
-            if return_logit:
-                loss_dict, grad_logit = loss_out
-            else:
-                loss_dict, grad_logit = loss_out, None
+            with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
+                if self.model_old is not None:
+                    with torch.no_grad():
+                        logit_old, features_old, _ = self.model_old(data['image'], ret_intermediate=True)
 
-            distill_weight = self.mbce_distill_weight if self.enable_mbce_distill else 0
-            loss_main = self.mbce_weight * loss_dict['loss_mbce'].sum()
-            loss_old = distill_weight * loss_dict['loss_mbce_distill'].sum() \
-                       + self.config['hyperparameter']['pkd'] * loss_dict['loss_pkd'].sum() \
-                       + self.config['hyperparameter']['cont'] * loss_dict['loss_cont']
+                        pred = logit_old.argmax(dim=1) + 1  # pred: [N. H, W]
+                        idx = (logit_old > 0.5).float()  # logit: [N, C, H, W]
+                        idx = idx.sum(dim=1)  # logit: [N, H, W]
+                        pred[idx == 0] = 0  # set background (non-target class)
+                        pseudo_label_region = torch.logical_and(
+                            data['label'] == 0, pred > 0
+                        ).unsqueeze(1)
 
-            opt_stepped = False
-            step_before = getattr(self.optimizer, "_step_count", 0)
-            if not self.use_separate_old_update:
-                loss = loss_main + loss_old
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                step_after = getattr(self.optimizer, "_step_count", 0)
-                opt_stepped = step_after > step_before
-                self.scaler.update()
-            else:
-                # 主监督更新
-                self.scaler.scale(loss_main).backward()
-                self.scaler.step(self.optimizer)
-                step_after = getattr(self.optimizer, "_step_count", 0)
-                opt_stepped = step_after > step_before
-                self.scaler.update()
+                fake_features = []
+                for cls in range(0, self.per_iter_prev_number.shape[0]):
+                    per_cls_fake_features = \
+                        self.prev_prototypes[cls].reshape(1, -1, 1, 1).repeat(1, 1, self.per_iter_prev_number[cls], 1)
+                    noise = \
+                        torch.randn_like(per_cls_fake_features) * self.prev_noise[cls].reshape(1, -1, 1, 1)
+                    per_cls_fake_features = per_cls_fake_features + noise
+                    rand_norm = \
+                        torch.randn_like(per_cls_fake_features) * \
+                        self.prev_norm[1, cls].reshape(1, 1, 1, 1) + \
+                        self.prev_norm[0, cls].reshape(1, 1, 1, 1)
+                    per_cls_fake_features = per_cls_fake_features * rand_norm
+                    fake_features.append(per_cls_fake_features)
 
-                # 独立的旧类伪梯度/蒸馏更新
-                self.optimizer.zero_grad(set_to_none=True)
-                loss_dict_old = self._forward_loss_pass(
-                    data, update_phase_bank=False, return_logit=False)
-                loss_old_step = distill_weight * loss_dict_old['loss_mbce_distill'].sum() \
-                                 + self.config['hyperparameter']['pkd'] * loss_dict_old['loss_pkd'].sum() \
-                                 + self.config['hyperparameter']['cont'] * loss_dict_old['loss_cont']
+                fake_features = torch.cat(fake_features, dim=2)
+                fake_label = torch.zeros(1, fake_features.shape[2], 1, requires_grad=False).to(self.device)
 
-                if loss_old_step.requires_grad:
-                    loss_old_scaled = self.pseudo_grad_scale * loss_old_step
-                    step_before_old = getattr(self.optimizer, "_step_count", 0)
-                    self.scaler.scale(loss_old_scaled).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    step_after_old = getattr(self.optimizer, "_step_count", 0)
-                    opt_stepped = opt_stepped or (step_after_old > step_before_old)
-                loss_old = loss_old_step
+                region_bg = torch.logical_and(pred == 0, data['label'] == 0)[:, 8::16, 8::16]
 
-            grad_loss = None
-            if self.grad_enabled and (epoch > self.grad_warmup) and (grad_logit is not None):
-                grad_loss = self._train_gradient_learner(grad_logit, data['label'])
+                logit, features, extra = \
+                    self.model(data['image'], ret_intermediate=True, fake_features=fake_features, region_bg=region_bg)
+                logits_for_fake = extra[0]
+                logits_for_extra_bg = extra[1]
 
-            if self.lr_scheduler is not None and opt_stepped and getattr(self.optimizer, "_step_count", 0) > 0:
-                self.lr_scheduler.step()
+                # [|Ct|]
+                loss_mbce_ori = self.BCELoss(
+                    logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
+                    data['label'],                # [N, H, W]
+                ).mean(dim=[0, 2, 3])
+
+                if logits_for_extra_bg is not None:
+                    extra_bg_label = torch.zeros(1, logits_for_extra_bg.shape[2], 1, requires_grad=False).to(self.device)
+                    loss_mbce_extra_bg = self.BCELoss_extra_bg(
+                        logits_for_extra_bg[:, -self.n_new_classes:],
+                        extra_bg_label,
+                    ).mean(dim=[0, 2, 3])
+                else:
+                    loss_mbce_extra_bg = 0
+
+                loss_mbce_fake = self.BCELoss_fake(
+                    logits_for_fake[:, -self.n_new_classes:],
+                    fake_label
+                ).mean(dim=[0, 2, 3])
+
+                stride_num = features[-1].shape[0] * features[-1].shape[2] * features[-1].shape[3]
+                weight_extra_bg = self.extra_bg_ratio * region_bg.sum() / stride_num
+                weight_fake = fake_label.shape[1] / stride_num
+
+                loss_mbce = loss_mbce_ori + loss_mbce_fake * weight_fake + loss_mbce_extra_bg * weight_extra_bg
+                loss_mbce = loss_mbce / (1 + weight_extra_bg + weight_fake)
+
+                loss_pkd = self.PKDLoss(features, features_old, pseudo_label_region.to(torch.float32))
+
+                loss_cont = self.ContLoss(
+                    features[-1], logit[:, -self.n_new_classes:], data['label'], self.prev_prototypes)
+
+                loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum() \
+                       + self.config['hyperparameter']['pkd'] * loss_pkd.sum() \
+                       + self.config['hyperparameter']['cont'] * loss_cont
+
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
-            self.train_metrics.update('loss', (loss_main + loss_old).item())
-            self.train_metrics.update('loss_mbce', loss_dict['loss_mbce'].sum().item() * self.mbce_weight)
-            self.train_metrics.update('loss_bce_distill',
-                                      loss_dict['loss_mbce_distill'].sum().item() * distill_weight)
-            self.train_metrics.update('loss_pkd', loss_dict['loss_pkd'].sum().item() * self.config['hyperparameter']['pkd'])
-            self.train_metrics.update('loss_cont', loss_dict['loss_cont'].item() * self.config['hyperparameter']['cont'])
-            self.train_metrics.update('loss_old_step', loss_old.item() if hasattr(loss_old, 'item') else float(loss_old))
-            self.train_metrics.update('consistency_ratio', loss_dict['consistency_ratio'].item())
-            if grad_loss is not None:
-                self.train_metrics.update('loss_grad', grad_loss)
+            self.train_metrics.update('loss', loss.item())
+            self.train_metrics.update('loss_mbce', loss_mbce.sum().item() * self.config['hyperparameter']['mbce'])
+            self.train_metrics.update('loss_pkd', loss_pkd.sum().item() * self.config['hyperparameter']['pkd'])
+            self.train_metrics.update('loss_cont', loss_cont.item() * self.config['hyperparameter']['cont'])
 
             # Get First lr
             if batch_idx == 0:
                 self.writer.add_scalars('lr', {'lr': self.optimizer.param_groups[0]['lr']}, epoch - 1)
                 self.logger.info(f"lr[0]: {self.optimizer.param_groups[0]['lr']:.6f} / lr[1]: {self.optimizer.param_groups[1]['lr']:.6f} / lr[2]: {self.optimizer.param_groups[2]['lr']:.6f}")
+
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
 
             self.progress(self.logger, batch_idx, len(self.train_loader))
 

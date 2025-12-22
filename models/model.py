@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,25 +82,6 @@ class DeepLabV3(nn.Module):
         x_o = torch.cat(out, dim=1)  # [N, |Ct|, H, W]
         return x_o
 
-    def forward_from_top_feature(self, x_pl: torch.Tensor, out_size=None) -> torch.Tensor:
-        """Forward only the segmentation head given a top-level feature map.
-
-        This is used by feature-map replay, where we already have the top feature
-        (ASPP output) and want logits without running the backbone.
-
-        Args:
-            x_pl: Tensor of shape [N, 256, h, w] (same as ASPP output).
-            out_size: Optional spatial size (H, W) to upsample logits to.
-
-        Returns:
-            logits of shape [N, tot_classes, h, w] if out_size is None,
-            otherwise [N, tot_classes, H, W].
-        """
-        logits_small = self.forward_class_prediction(x_pl)
-        if out_size is None:
-            return logits_small
-        return F.interpolate(logits_small, size=out_size, mode="bilinear", align_corners=False)
-
     def _init_classifier(self):
         # Random Initialization
         for m in self.cls.modules():
@@ -150,15 +130,7 @@ class DeepLabV3(nn.Module):
                 m.eval()
 
     def _load_pretrained_model(self, pretrained_path):
-        try:
-            pretrain_dict = torch.load(pretrained_path, map_location=torch.device('cpu'))
-        except RuntimeError as e:
-            if "PytorchStreamReader failed reading zip archive" in str(e):
-                file_hint = "" if not os.path.exists(pretrained_path) else f" (文件大小 {os.path.getsize(pretrained_path)} 字节)"
-                raise RuntimeError(
-                    f"无法读取权重文件 {pretrained_path}{file_hint}，文件可能损坏或未完整保存，请重新导出或复制该检查点。"
-                ) from e
-            raise
+        pretrain_dict = torch.load(pretrained_path, map_location=torch.device('cpu'))
         self.load_state_dict(pretrain_dict['state_dict'], strict=False)
 
     def _set_bn_momentum(self, model=None, momentum=0.1):

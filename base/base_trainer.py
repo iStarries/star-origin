@@ -1,14 +1,12 @@
 import os.path
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 from abc import abstractmethod
 from numpy import inf
 from logger import TensorboardWriter
-from pathlib import Path
 
 
 
@@ -18,27 +16,15 @@ class BaseTrainer:
     """
     def __init__(self, config, logger, gpu):
         self.config = config
-
+        
         cfg_trainer = config['trainer']
         self.epochs = cfg_trainer['epochs']
         self.save_period = cfg_trainer['epochs'] if cfg_trainer['save_period'] == -1 else cfg_trainer['save_period']
         # self.save_period = 1
         self.validation_period = cfg_trainer['validation_period'] if cfg_trainer['validation_period'] == -1 else cfg_trainer['validation_period']
-        self.validate_on_test = cfg_trainer.get('validate_on_test', False)
-        self.validate_tail_epochs = cfg_trainer.get('validate_tail_epochs', 20)
-        self.best_test_miou = -inf
-        self.best_test_checkpoint_path = None
-        self.keep_last_checkpoint_only = cfg_trainer.get('keep_last_checkpoint_only', False)
-        self.keep_last_prototype_only = cfg_trainer.get('keep_last_prototype_only', self.keep_last_checkpoint_only)
-        self._latest_checkpoint_path = None
-        self._latest_prototype_path = None
-        self.do_test = False
         self.monitor = cfg_trainer.get('monitor', 'off')
         self.reset_best_mnt = cfg_trainer['reset_best_mnt']
-        if dist.is_available() and dist.is_initialized():
-            self.rank = dist.get_rank()
-        else:
-            self.rank = 0
+        self.rank = torch.distributed.get_rank()
 
         if logger is None:
             self.logger = config.get_logger('trainer', cfg_trainer['verbosity'])
@@ -49,7 +35,7 @@ class BaseTrainer:
                 self.writer = TensorboardWriter(config.log_dir, self.logger, cfg_trainer['tensorboard'])
             else:
                 self.writer = TensorboardWriter(config.log_dir, self.logger, False)
-
+        
         if gpu is None:
             # setup GPU device if available, move model into configured device
             self.device, self.device_ids = self._prepare_device(config['n_gpu'])
@@ -71,13 +57,10 @@ class BaseTrainer:
         self.start_epoch = 1
 
         self.checkpoint_dir = config.save_dir
-
-        # 梯度学习器（若存在）的状态与优化器，会在保存/恢复时一并处理
-        self.grad_learner = None
-        self.grad_optimizer = None
-
-        # Phase prototype bank is attached by subclasses when enabled.
-        self.phase_bank = None
+        self.enable_test_validation = self.config.config.get('validate', False)
+        self.test_validation_window = 25
+        self.test_best_miou = -inf
+        self.test_best_path = None
 
 
         # if config.resume is not None:
@@ -105,30 +88,19 @@ class BaseTrainer:
             log = {'epoch': epoch}
             log.update(result)
 
+            test_log = None
+            if self.enable_test_validation and epoch >= self.epochs - self.test_validation_window + 1:
+                test_log = self._test(epoch)
+                log.update(**{'test_' + k: v for k, v in test_log.items()})
+                if self.rank == 0:
+                    test_miou = self._extract_test_miou(test_log)
+                    if test_miou is not None and test_miou > self.test_best_miou:
+                        self.test_best_miou = test_miou
+                        self._save_best_test_checkpoint(epoch, test_miou)
+
             # print logged informations to the screen
             for key, value in log.items():
                 self.logger.info('    {:15s}: {}'.format(str(key), value))
-
-            # 在最后若干个 epoch 内按需运行测试集评估，并根据测试集 mIoU 保留最佳权重
-            if self.validate_on_test and self.do_test and (epoch > self.epochs - self.validate_tail_epochs):
-                test_log, raw_test_metrics = self._test(epoch=epoch, return_metrics=True)
-                if self.rank == 0:
-                    self.logger.info(f"Test evaluation at epoch {epoch} (validate mode)")
-                    for t_key, t_val in test_log.items():
-                        self.logger.info('    {:15s}: {}'.format(str(t_key), t_val))
-
-                    miou_result = raw_test_metrics.get('Mean_Intersection_over_Union', {})
-                    miou_overall = None
-                    if isinstance(miou_result, dict) and ('overall' in miou_result):
-                        miou_overall = float(miou_result['overall'])
-
-                    if miou_overall is not None and miou_overall > self.best_test_miou:
-                        if self.best_test_checkpoint_path is not None and self.best_test_checkpoint_path.exists():
-                            self.best_test_checkpoint_path.unlink()
-
-                        checkpoint_path = self._save_test_best_model(epoch, miou_overall)
-                        self.best_test_checkpoint_path = checkpoint_path
-                        self.best_test_miou = miou_overall
 
             # evaluate model performance according to configured metric, save best checkpoint as model_best
             if self.rank == 0:
@@ -147,7 +119,7 @@ class BaseTrainer:
                         self.mnt_best = log[self.mnt_metric]
                         not_improved_count = 0
                         self._save_best_model(epoch)
-
+                        
                     else:
                         not_improved_count += 1
 
@@ -166,27 +138,55 @@ class BaseTrainer:
         # close TensorboardX
         self.writer.close()
 
+    def _extract_test_miou(self, test_log):
+        if not test_log:
+            return None
+        miou_key = 'Mean_Intersection_over_Union_overall'
+        if miou_key not in test_log:
+            self.logger.warning(f"Warning: Metric '{miou_key}' is not found in test log.")
+            return None
+        return float(test_log[miou_key])
+
+    def _save_best_test_checkpoint(self, epoch, miou):
+        arch = type(self.model).__name__
+        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            state = {
+                'arch': arch,
+                'epoch': epoch,
+                'state_dict': self.model.module.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+                'lr_scheduler': self.lr_scheduler.state_dict(),
+                "scaler": self.scaler.state_dict(),
+                'monitor_best': self.mnt_best,
+            }
+        else:
+            state = {
+                'arch': arch,
+                'epoch': epoch,
+                'state_dict': self.model.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+                'lr_scheduler': self.lr_scheduler.state_dict(),
+                "scaler": self.scaler.state_dict(),
+                'monitor_best': self.mnt_best,
+            }
+        filename = self.checkpoint_dir / f'test_best-epoch{epoch}-miou{miou:.2f}.pth'
+        if self.test_best_path is not None and self.test_best_path.exists():
+            self.test_best_path.unlink()
+        torch.save(state, filename)
+        self.test_best_path = filename
+        self.logger.info(f"Saving current best test checkpoint: {filename} ...")
+
     def save_prototypes(self, config, epoch):
-        save_file = Path(config.save_dir) / f"prototypes-epoch{epoch}.pth"
+        save_file = str(config.save_dir) + "/prototypes-epoch{}.pth".format(epoch)
 
         all_info = {
             "numbers": self.numbers,
             "prototypes": self.prototypes,
             "norm_mean_and_std": self.norm_mean_and_std,
-            "noise": self.noise,
-            "phase_bank": self.phase_bank.state_dict() if self.phase_bank is not None else None,
+            "noise": self.noise
         }
 
-        torch.save(all_info, str(save_file))
-
-        if self.keep_last_prototype_only and self._latest_prototype_path is not None and \
-                self._latest_prototype_path.exists() and self._latest_prototype_path != save_file:
-            try:
-                self._latest_prototype_path.unlink()
-            except OSError:
-                self.logger.warning(f"Failed to remove old prototype file: {self._latest_prototype_path}")
-
-        self._latest_prototype_path = save_file
+        torch.save(all_info, save_file)
 
     def compute_cls_number(self, config):
         self.logger.info("computing number of pixels...")
@@ -272,7 +272,7 @@ class BaseTrainer:
                 self.norm_mean_and_std = norm_mean_and_std
             else:
                 self.norm_mean_and_std = torch.cat([self.prev_norm, norm_mean_and_std], dim=1)
-
+            
         self.model.train()
 
     def compute_noise(self, config):
@@ -326,12 +326,12 @@ class BaseTrainer:
                 self.noise = noise
             else:
                 self.noise = torch.cat([self.prev_noise, noise], dim=0)
-
+            
         self.model.train()
 
     def test(self):
         result = self._test()
-
+        
         if self.rank == 0:
             log = {}
             log.update(result)
@@ -364,33 +364,6 @@ class BaseTrainer:
         list_ids = list(range(n_gpu_use))
         return device, list_ids
 
-    def _load_model_state(self, state_dict):
-        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            self.model.module.load_state_dict(state_dict)
-        else:
-            self.model.load_state_dict(state_dict)
-
-    def _maybe_get_grad_learner_state(self):
-        if self.grad_learner is None:
-            return None
-        if isinstance(self.grad_learner, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            return self.grad_learner.module.state_dict()
-        return self.grad_learner.state_dict()
-
-    def _maybe_get_grad_optimizer_state(self):
-        if self.grad_optimizer is None:
-            return None
-        return self.grad_optimizer.state_dict()
-
-    def _load_grad_learner_state(self, state_dict):
-        if self.grad_learner is None:
-            self.logger.warning("检查点包含梯度学习器状态，但当前 Trainer 未初始化梯度学习器，已跳过加载。")
-            return
-        if isinstance(self.grad_learner, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            self.grad_learner.module.load_state_dict(state_dict)
-        else:
-            self.grad_learner.load_state_dict(state_dict)
-
     def _save_checkpoint(self, epoch):
         """
         Saving checkpoints
@@ -408,8 +381,6 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
-                'grad_learner': self._maybe_get_grad_learner_state(),
-                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
         else:
             state = {
@@ -420,21 +391,10 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
-                'grad_learner': self._maybe_get_grad_learner_state(),
-                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
             }
-        filename = self.checkpoint_dir / f'checkpoint-epoch{epoch}.pth'
-        torch.save(state, str(filename))
+        filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
+        torch.save(state, filename)
         self.logger.info("Saving checkpoint: {} ...".format(filename))
-
-        if self.keep_last_checkpoint_only and self._latest_checkpoint_path is not None and \
-                self._latest_checkpoint_path.exists() and self._latest_checkpoint_path != filename:
-            try:
-                self._latest_checkpoint_path.unlink()
-            except OSError:
-                self.logger.warning(f"Failed to remove old checkpoint: {self._latest_checkpoint_path}")
-
-        self._latest_checkpoint_path = filename
 
     def _save_best_model(self, epoch):
         """
@@ -453,8 +413,6 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
-                'grad_learner': self._maybe_get_grad_learner_state(),
-                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
                 # 'config': self.config
             }
         else:
@@ -466,47 +424,11 @@ class BaseTrainer:
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
-                'grad_learner': self._maybe_get_grad_learner_state(),
-                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
                 # 'config': self.config
             }
         best_path = str(self.checkpoint_dir / 'model_best.pth')
         torch.save(state, best_path)
         self.logger.info("Saving current best: model_best.pth ...")
-
-    def _save_test_best_model(self, epoch, miou):
-        """专门用于测试集验证阶段的最佳权重保存，文件名包含 epoch 与 mIoU。"""
-
-        arch = type(self.model).__name__
-        if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            state = {
-                'arch': arch,
-                'epoch': epoch,
-                'state_dict': self.model.module.state_dict(),
-                'optimizer': self.optimizer.state_dict(),
-                'lr_scheduler': self.lr_scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                'monitor_best': miou,
-                'grad_learner': self._maybe_get_grad_learner_state(),
-                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
-            }
-        else:
-            state = {
-                'arch': arch,
-                'epoch': epoch,
-                'state_dict': self.model.state_dict(),
-                'optimizer': self.optimizer.state_dict(),
-                'lr_scheduler': self.lr_scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                'monitor_best': miou,
-                'grad_learner': self._maybe_get_grad_learner_state(),
-                'grad_optimizer': self._maybe_get_grad_optimizer_state(),
-            }
-
-        filename = self.checkpoint_dir / f"best-test-epoch{epoch}-miou{miou:.2f}.pth"
-        torch.save(state, str(filename))
-        self.logger.info(f"Saving current test-best: {filename.name} ...")
-        return filename
 
     def _resume_checkpoint(self, resume_path, test=False):
         """
@@ -527,20 +449,11 @@ class BaseTrainer:
         else:
             self.model.load_state_dict(checkpoint['state_dict'])
 
-        grad_state = checkpoint.get('grad_learner', None)
-        if grad_state is not None:
-            self._load_grad_learner_state(grad_state)
-
         if test is False:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             self.scaler.load_state_dict(checkpoint['scaler'])
-
-            if self.grad_optimizer is not None and 'grad_optimizer' in checkpoint:
-                self.grad_optimizer.load_state_dict(checkpoint['grad_optimizer'])
-            elif self.grad_optimizer is not None and grad_state is not None:
-                self.logger.warning("检查点包含梯度学习器，但缺少其优化器状态，已跳过 grad_optimizer 加载。")
-
+        
         self.logger.info("Checkpoint loaded. Resume training from epoch {}".format(self.start_epoch))
 
 def label_to_one_hot(label, logit, n_old_classes, ignore_index=255):
