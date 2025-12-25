@@ -1,5 +1,11 @@
-尝试了--phase_lambda 0.002 --phase_k_old 3，结果如下
-    Mean_Intersection_over_Union_old: 72.30
-    Mean_Intersection_over_Union_new: 61.15
-    Mean_Intersection_over_Union_harmonic: 66.26
-    Mean_Intersection_over_Union_overall: 64.34
+没加PPB回放的基准性能：
+     Mean_Intersection_over_Union_old: 72.20
+     Mean_Intersection_over_Union_new: 61.06
+     Mean_Intersection_over_Union_harmonic: 66.17
+     Mean_Intersection_over_Union_overall: 64.24
+加PPB回放后默认配置"lambda_replay": 0.1,"k_old": 5对应的性能：
+     Mean_Intersection_over_Union_old: 70.52
+     Mean_Intersection_over_Union_new: 60.55
+     Mean_Intersection_over_Union_harmonic: 65.16
+     Mean_Intersection_over_Union_overall: 63.40
+

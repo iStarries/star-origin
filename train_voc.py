@@ -247,6 +247,7 @@ if __name__ == '__main__':
             target='phase_replay;ref_mode',
             choices=['random', 'batch_mean'],
         ),
+        CustomArgs(['--phase_detach_ref'], action='store_false', target='phase_replay;replay_detach_ref'),
     ]
     config = ConfigParser.from_args(args, options)
     main(config)

@@ -77,7 +77,7 @@ class Trainer_base(BaseTrainer):
             self.metric_ftns_test = [getattr(self.evaluator_test, met) for met in config['metrics']]
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce',
+            'loss', 'loss_mbce', 'loss_phase', 'loss_phase_raw',
             writer=self.writer,
             colums=['total', 'counts', 'average'],
         )
@@ -170,6 +170,9 @@ class Trainer_base(BaseTrainer):
 
                 self._maybe_init_ppb(logit, features)
 
+                loss_phase = torch.tensor(0.0, device=self.device)
+                loss_phase_raw = torch.tensor(0.0, device=self.device)
+
                 loss_mbce = self.BCELoss(
                     logit[:, -self.n_new_classes:],  # [N, |Ct|, H, W]
                     data['label'],                # [N, H, W]
@@ -195,6 +198,10 @@ class Trainer_base(BaseTrainer):
                                 mask = label_train_id[b] == class_id
                                 self.ppb.update_from_feature(feat_b, mask, class_id)
 
+                    # Base step不做回放，仅统计
+                    loss_phase_raw = torch.tensor(0.0, device=self.device)
+                    loss_phase = torch.tensor(0.0, device=self.device)
+
                 loss = self.config['hyperparameter']['mbce'] * loss_mbce.sum()
 
             self.scaler.scale(loss).backward()
@@ -206,6 +213,8 @@ class Trainer_base(BaseTrainer):
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
             self.train_metrics.update('loss', loss.item())
             self.train_metrics.update('loss_mbce', loss_mbce.sum().item())
+            self.train_metrics.update('loss_phase', loss_phase.item())
+            self.train_metrics.update('loss_phase_raw', loss_phase_raw.item())
 
             # Get First lr
             if batch_idx == 0:
@@ -366,7 +375,7 @@ class Trainer_incremental(Trainer_base):
                 self.model_old = nn.DataParallel(model_old, device_ids=self.device_ids)
 
         self.train_metrics = MetricTracker(
-            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont',
+            'loss', 'loss_mbce', 'loss_pkd', 'loss_cont', 'loss_phase', 'loss_phase_raw',
             writer=self.writer, colums=['total', 'counts', 'average'],
         )
         if config.resume is not None:
@@ -463,6 +472,9 @@ class Trainer_incremental(Trainer_base):
             self.optimizer.zero_grad(set_to_none=True)
             data['image'], data['label'] = data['image'].to(self.device), data['label'].to(self.device)
             with torch.cuda.amp.autocast(enabled=self.config['use_amp']):
+                loss_phase = torch.tensor(0.0, device=self.device)
+                loss_phase_raw = torch.tensor(0.0, device=self.device)
+
                 if self.model_old is not None:
                     with torch.no_grad():
                         logit_old, features_old, _ = self.model_old(data['image'], ret_intermediate=True)
@@ -594,9 +606,11 @@ class Trainer_incremental(Trainer_base):
                     if replay_losses:
                         loss_replay = torch.stack(replay_losses).mean()
                         lam = self.phase_replay_cfg.get('lambda_replay', 0.1)
-                        loss = loss + lam * loss_replay
+                        loss_phase_raw = loss_replay
+                        loss_phase = lam * loss_replay
+                        loss = loss + loss_phase
                         if batch_idx % 50 == 0 and self.rank == 0:
-                            self.logger.info(f"[PHASE] loss_replay={loss_replay.item():.4f} lam={lam} lam*replay={lam * loss_replay.item():.4f}")
+                            self.logger.info(f"[PHASE] loss_replay={loss_replay.item():.4f} lam={lam} lam*replay={(lam * loss_replay).item():.4f}")
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -607,6 +621,8 @@ class Trainer_incremental(Trainer_base):
             self.train_metrics.update('loss_mbce', loss_mbce.sum().item() * self.config['hyperparameter']['mbce'])
             self.train_metrics.update('loss_pkd', loss_pkd.sum().item() * self.config['hyperparameter']['pkd'])
             self.train_metrics.update('loss_cont', loss_cont.item() * self.config['hyperparameter']['cont'])
+            self.train_metrics.update('loss_phase', loss_phase.item())
+            self.train_metrics.update('loss_phase_raw', loss_phase_raw.item())
 
             # Get First lr
             if batch_idx == 0:

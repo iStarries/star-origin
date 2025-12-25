@@ -16,79 +16,121 @@ SEPARATE_UPDATE_ARGS="--use_separate_old_update --pseudo_grad_scale 1.0"
 grad_ARGS="--grad --grad_samples 512 --grad_hidden 64 --grad_layers 2 --grad_alpha 0.5 --grad_eta 1.0 --grad_lambda 1.0 --grad_eps 1e-6 --grad_lr 1e-3 --grad_warmup 0"
 
 
-#--phase_replay
+# --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref
 #${CONSISTENCY_ARGS} ${SEPARATE_UPDATE_ARGS}
 #${grad_ARGS}
 #--validate
 
-#NAME='real-grad-test'
-#TASKNAME='15-5'
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS} ${grad_ARGS}
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} ${grad_ARGS} --validate --freeze_bn --mem_size ${MEMORY_SIZE}
-
 ####---------------------------------------------------------------------------------------------------------------
 
-#NAME='phase-lambda0'
-#TASKNAME='5-3'
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0 \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS}
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0 \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE} \
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0  \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0  --validate \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0  \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
-#
-#python train_voc.py -c configs/config_voc.json \
-#-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0  --validate \
-#--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
-#
-NAME='phase-default'
-TASKNAME='5-3'
-#
+NAME='phase-lambda001-k_old1'
+TASKNAME='15-1'
+
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS}
 
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE} \
 
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
 
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
 
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
 
 python train_voc.py -c configs/config_voc.json \
--d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --validate \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --validate \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+#
+NAME='phase-lambda001-k_old1-backbone'
+TASKNAME='5-3'
+#
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE} \
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 1 --phase_detach_ref --validate \
 --task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
 
 
+NAME='phase-lambda003-k_old1'
+TASKNAME='5-3'
 
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.003 --phase_k_old 1 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.003 --phase_k_old 1 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE} \
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.003 --phase_k_old 1 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.003 --phase_k_old 1 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.003 --phase_k_old 1 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.003 --phase_k_old 1 --validate \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+NAME='phase-lambda001-k_old2'
+TASKNAME='5-3'
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 2 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 0 --lr ${INIT_LR} --bs ${BS}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 2 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 1 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE} \
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 2 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 2 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 2 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 3 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 2 \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 4 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
+
+python train_voc.py -c configs/config_voc.json \
+-d ${GPU} --save_dir ${SAVEDIR} --name ${NAME} --phase_replay --phase_lambda 0.001 --phase_k_old 2 --validate \
+--task_name ${TASKNAME} --task_setting ${TASKSETTING} --task_step 5 --lr ${LR} --bs ${BS} --freeze_bn --mem_size ${MEMORY_SIZE}
 
 
 
