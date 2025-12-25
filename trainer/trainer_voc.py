@@ -377,7 +377,7 @@ class Trainer_incremental(Trainer_base):
         self.PKDLoss = PKDLoss()
         self.ContLoss = ContLoss(n_old_classes=self.n_old_classes + 1, n_new_classes=self.n_new_classes)
 
-        self.replay_loss_fn = nn.CrossEntropyLoss()
+        # self.replay_loss_fn = nn.CrossEntropyLoss()
 
         self._load_phase_ppb(config)
 
@@ -580,18 +580,23 @@ class Trainer_incremental(Trainer_base):
                         if x_syn is None:
                             continue
                         logits_syn = self._forward_head(x_syn.unsqueeze(0))
-                        target = torch.full(
+                        bg_label = torch.zeros(
                             (1, x_syn.shape[1], x_syn.shape[2]),
-                            fill_value=class_id,
                             dtype=torch.long,
                             device=logits_syn.device,
                         )
-                        replay_losses.append(F.cross_entropy(logits_syn, target))
+                        loss_replay_c = self.BCELoss_fake(
+                            logits_syn[:, -self.n_new_classes:],
+                            bg_label,
+                        ).mean(dim=[0, 2, 3]).sum()
+                        replay_losses.append(loss_replay_c)
 
                     if replay_losses:
                         loss_replay = torch.stack(replay_losses).mean()
                         lam = self.phase_replay_cfg.get('lambda_replay', 0.1)
                         loss = loss + lam * loss_replay
+                        if batch_idx % 50 == 0 and self.rank == 0:
+                            self.logger.info(f"[PHASE] loss_replay={loss_replay.item():.4f} lam={lam} lam*replay={lam * loss_replay.item():.4f}")
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
