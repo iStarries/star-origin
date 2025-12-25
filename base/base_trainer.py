@@ -64,6 +64,7 @@ class BaseTrainer:
         self.test_validation_window = 25
         self.test_best_miou = -inf
         self.test_best_path = None
+        self.log_file_path = self.config.log_dir / "info.log"
         self._init_phase_replay_config()
 
         self.phase_replay_cfg = self.config.config.get('phase_replay', {})
@@ -365,6 +366,8 @@ class BaseTrainer:
 
         # close TensorboardX
         self.writer.close()
+        if self.rank == 0:
+            self._finalize_info_log()
 
     def _extract_test_miou(self, test_log):
         if not test_log:
@@ -403,6 +406,31 @@ class BaseTrainer:
         torch.save(state, filename)
         self.test_best_path = filename
         self.logger.info(f"Saving current best test checkpoint: {filename} ...")
+
+    def _finalize_info_log(self, miou_from_test=None):
+        if self.rank != 0:
+            return
+        miou = None
+        if self.test_best_miou != -inf:
+            miou = self.test_best_miou
+        elif miou_from_test is not None:
+            miou = miou_from_test
+
+        suffix = f"{miou:.2f}" if miou is not None and miou != -inf else "unknown"
+        info_log = self.log_file_path
+        if not info_log.exists():
+            return
+        new_name = info_log.with_name(f"info-miou{suffix}.log")
+        if info_log == new_name:
+            return
+        try:
+            if new_name.exists():
+                new_name.unlink()
+            info_log.rename(new_name)
+            self.log_file_path = new_name
+            self.logger.info(f"Renamed info log to {new_name.name}")
+        except OSError as e:
+            self.logger.warning(f"Failed to rename info log: {e}")
 
     def save_prototypes(self, config, epoch):
         save_file = str(config.save_dir) + "/prototypes-epoch{}.pth".format(epoch)
@@ -567,6 +595,8 @@ class BaseTrainer:
             # print logged informations to the screen
             for key, value in log.items():
                 self.logger.info('    {:15s}: {}'.format(str(key), value))
+            test_miou = self._extract_test_miou(result)
+            self._finalize_info_log(test_miou)
 
     def progress(self, logger, i, total_length):
         period = total_length // 5

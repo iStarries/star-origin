@@ -37,7 +37,7 @@ class ConfigParser:
             self.run_id = f"step_{self.config['data_loader']['args']['task']['step']}"
 
         self._save_dir = save_dir / 'models' / exper_name / self.run_id
-        self._log_dir = save_dir / 'log' / exper_name / self.run_id
+        self._log_dir = self._save_dir
 
         # make directory for saving checkpoints and log.
         # exist_ok = self.run_id == ''
@@ -61,7 +61,7 @@ class ConfigParser:
         except FileExistsError:
             if self.config['test'] is True:
                 run_id = datetime.now().strftime(r'%m%d_%H%M%S')
-                self._log_dir = save_dir / 'log' / exper_name / f'test_{run_id}'
+                self._log_dir = self._save_dir.parent / f'test_{run_id}'
                 self.log_dir.mkdir(parents=True, exist_ok=exist_ok)
                 pass
             else:
