@@ -503,11 +503,13 @@ class Trainer_incremental(Trainer_base):
 
                 fake_features = torch.cat(fake_features, dim=2)
                 fake_label = torch.zeros(1, fake_features.shape[2], 1, requires_grad=False).to(self.device)
-
+                use_fake = fake_features.shape[2] > 0
                 region_bg = torch.logical_and(pred == 0, data['label'] == 0)[:, 8::16, 8::16]
 
+                fake_features_arg = fake_features if use_fake else None
+
                 logit, features, extra = \
-                    self.model(data['image'], ret_intermediate=True, fake_features=fake_features, region_bg=region_bg)
+                    self.model(data['image'], ret_intermediate=True, fake_features=fake_features_arg, region_bg=region_bg)
                 logits_for_fake = extra[0]
                 logits_for_extra_bg = extra[1]
 
@@ -528,14 +530,19 @@ class Trainer_incremental(Trainer_base):
                 else:
                     loss_mbce_extra_bg = 0
 
-                loss_mbce_fake = self.BCELoss_fake(
-                    logits_for_fake[:, -self.n_new_classes:],
-                    fake_label
-                ).mean(dim=[0, 2, 3])
+                if logits_for_fake is not None and fake_label.shape[1] > 0:
+                    loss_mbce_fake = self.BCELoss_fake(
+                        logits_for_fake[:, -self.n_new_classes:],
+                        fake_label
+                    ).mean(dim=[0, 2, 3])
+                    weight_fake_pts = fake_label.shape[1]
+                else:
+                    loss_mbce_fake = torch.zeros_like(loss_mbce_ori)
+                    weight_fake_pts = 0.0
 
                 stride_num = features[-1].shape[0] * features[-1].shape[2] * features[-1].shape[3]
-                weight_extra_bg = self.extra_bg_ratio * region_bg.sum() / stride_num
-                weight_fake = fake_label.shape[1] / stride_num
+                weight_extra_bg = self.extra_bg_ratio * region_bg.sum() / stride_num if logits_for_extra_bg is not None else 0.0
+                weight_fake = (weight_fake_pts / stride_num) if stride_num > 0 else 0.0
 
                 loss_mbce = loss_mbce_ori + loss_mbce_fake * weight_fake + loss_mbce_extra_bg * weight_extra_bg
                 loss_mbce = loss_mbce / (1 + weight_extra_bg + weight_fake)

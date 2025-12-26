@@ -102,7 +102,10 @@ class PKDLoss(nn.Module):
             pseudo_label_region, size=features[2].shape[2:], mode="bilinear", align_corners=False)
 
         loss_5 = self.criterion(features[5], features_old[5])
-        loss_5 = (loss_5 * pseudo_label_region_5).sum() / (pseudo_label_region_5.sum() * features[5].shape[1])
+        denom = pseudo_label_region_5.sum() * features[5].shape[1]
+        if denom <= 0:
+            return loss_5.sum() * 0.0
+        loss_5 = (loss_5 * pseudo_label_region_5).sum() / denom
 
         return loss_5
 
@@ -126,10 +129,14 @@ class ContLoss(nn.Module):
             target[:, int(cls_idx) - self.n_old_classes] = (label == int(cls_idx)).float()
 
         small_target = F.interpolate(target, size=features.shape[2:], mode='bilinear', align_corners=False)
+        if small_target.sum() == 0:
+            return features.sum() * 0.0
+
         new_center = F.normalize(features, p=2, dim=1).unsqueeze(1) * small_target.unsqueeze(2)
         new_center = F.normalize(new_center.sum(dim=[0, 3, 4]), p=2, dim=1)
 
         dist_pp = torch.norm(new_center.unsqueeze(0) - prev_prototypes.unsqueeze(1), p=2, dim=2)
-        l_neg = (1 / dist_pp.min(0).values).mean()
+        dist_min = torch.clamp(dist_pp.min(0).values, min=1e-6)
+        l_neg = (1 / dist_min).mean()
 
         return l_neg
