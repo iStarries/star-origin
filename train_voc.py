@@ -232,6 +232,7 @@ if __name__ == '__main__':
         CustomArgs(['--freeze_bn'], action='store_true', target='arch;args;freeze_all_bn'),
         CustomArgs(['--test'], action='store_true', target='test'),
         CustomArgs(['--validate'], action='store_true', target='validate'),
+        CustomArgs(['--validate_a'], action='store_true', target='validate_a'),
 
         CustomArgs(['--phase_replay'], action='store_true', target='phase_replay;enabled'),
         CustomArgs(['--phase_lambda'], type=float, target='phase_replay;lambda_replay'),

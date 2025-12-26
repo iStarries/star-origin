@@ -60,11 +60,24 @@ class BaseTrainer:
         self.start_epoch = 1
 
         self.checkpoint_dir = config.save_dir
-        self.enable_test_validation = self.config.config.get('validate', False)
-        self.test_validation_window = 25
-        self.test_best_miou = -inf
-        self.test_best_path = None
+        validate_on_test = self.config.config.get('validate', False)
+        validate_on_val = self.config.config.get('validate_a', False)
+
+        self.tail_validation_sources = []
+        if validate_on_val:
+            self.tail_validation_sources.append('val')
+        if validate_on_test:
+            self.tail_validation_sources.append('test')
+
+        self.enable_tail_validation = len(self.tail_validation_sources) > 0
+        self.tail_validation_window = 25
+        self.tail_best_miou = {'val': -inf, 'test': -inf}
+        self.tail_best_path = {'val': None, 'test': None}
         self.log_file_path = self.config.log_dir / "info.log"
+        self.test_best_miou = self.tail_best_miou['test']
+        self.test_best_path = self.tail_best_path['test']
+        self.val_best_miou = self.tail_best_miou['val']
+        self.val_best_path = self.tail_best_path['val']
         self._init_phase_replay_config()
 
         self.phase_replay_cfg = self.config.config.get('phase_replay', {})
@@ -316,15 +329,23 @@ class BaseTrainer:
             log = {'epoch': epoch}
             log.update(result)
 
-            test_log = None
-            if self.enable_test_validation and epoch >= self.epochs - self.test_validation_window + 1:
-                test_log = self._test(epoch)
-                log.update(**{'test_' + k: v for k, v in test_log.items()})
-                if self.rank == 0:
-                    test_miou = self._extract_test_miou(test_log)
-                    if test_miou is not None and test_miou > self.test_best_miou:
-                        self.test_best_miou = test_miou
-                        self._save_best_test_checkpoint(epoch, test_miou)
+            if self.enable_tail_validation and epoch >= self.epochs - self.tail_validation_window + 1:
+                for source in self.tail_validation_sources:
+                    if source == 'test':
+                        tail_log = self._test(epoch)
+                        prefix = 'test_'
+                    elif source == 'val':
+                        tail_log = self._valid_epoch(epoch)
+                        prefix = 'val_'
+                    else:
+                        raise RuntimeError(f"Unsupported tail validation source: {source}")
+
+                    log.update(**{prefix + k: v for k, v in tail_log.items()})
+                    if self.rank == 0:
+                        tail_miou = self._extract_tail_miou(tail_log)
+                        if tail_miou is not None and tail_miou > self.tail_best_miou[source]:
+                            self.tail_best_miou[source] = tail_miou
+                            self._save_best_tail_checkpoint(epoch, tail_miou, source)
 
             # print logged informations to the screen
             for key, value in log.items():
@@ -364,21 +385,24 @@ class BaseTrainer:
                     self.save_prototypes(self.config, epoch)
                     self.save_phase_ppb(self.config)
 
+        if self.rank == 0:
+            self._finalize_info_log()
+
         # close TensorboardX
         self.writer.close()
         if self.rank == 0:
             self._finalize_info_log()
 
-    def _extract_test_miou(self, test_log):
-        if not test_log:
+    def _extract_tail_miou(self, log_data):
+        if not log_data:
             return None
         miou_key = 'Mean_Intersection_over_Union_overall'
-        if miou_key not in test_log:
-            self.logger.warning(f"Warning: Metric '{miou_key}' is not found in test log.")
+        if miou_key not in log_data:
+            self.logger.warning(f"Warning: Metric '{miou_key}' is not found in log.")
             return None
-        return float(test_log[miou_key])
+        return float(log_data[miou_key])
 
-    def _save_best_test_checkpoint(self, epoch, miou):
+    def _save_best_tail_checkpoint(self, epoch, miou, source):
         arch = type(self.model).__name__
         if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
             state = {
@@ -400,12 +424,30 @@ class BaseTrainer:
                 "scaler": self.scaler.state_dict(),
                 'monitor_best': self.mnt_best,
             }
-        filename = self.checkpoint_dir / f'test_best-epoch{epoch}-miou{miou:.2f}.pth'
-        if self.test_best_path is not None and self.test_best_path.exists():
-            self.test_best_path.unlink()
+        filename = self.checkpoint_dir / f'{source}_best-epoch{epoch}-miou{miou:.2f}.pth'
+        if self.tail_best_path.get(source) is not None and self.tail_best_path[source].exists():
+            self.tail_best_path[source].unlink()
         torch.save(state, filename)
-        self.test_best_path = filename
-        self.logger.info(f"Saving current best test checkpoint: {filename} ...")
+        self.tail_best_path[source] = filename
+        self.logger.info(f"Saving current best {source} checkpoint: {filename} ...")
+        if source == 'test':
+            self.test_best_miou = miou
+            self.test_best_path = filename
+        if source == 'val':
+            self.val_best_miou = miou
+            self.val_best_path = filename
+
+    def _finalize_info_log(self):
+        """
+        结束训练时记录尾端验证的最优结果，兼容旧字段，避免属性缺失。
+        """
+        for source in self.tail_validation_sources:
+            best_miou = self.tail_best_miou.get(source, -inf)
+            best_path = self.tail_best_path.get(source)
+            if best_miou != -inf:
+                self.logger.info(f"[tail-{source}] best mIoU: {best_miou:.2f}, path: {best_path}")
+            else:
+                self.logger.info(f"[tail-{source}] no best checkpoint recorded")
 
     def _finalize_info_log(self, miou_from_test=None):
         if self.rank != 0:
@@ -597,6 +639,18 @@ class BaseTrainer:
                 self.logger.info('    {:15s}: {}'.format(str(key), value))
             test_miou = self._extract_test_miou(result)
             self._finalize_info_log(test_miou)
+
+    def _extract_test_miou(self, result: dict):
+        if result is None:
+            return None
+        key = "Mean_Intersection_over_Union_overall"
+        if key in result:
+            return result[key]
+        # 兼容你可能加了前缀的情况（如 test_/val_）
+        for k, v in result.items():
+            if k.endswith(key):
+                return v
+        return None
 
     def progress(self, logger, i, total_length):
         period = total_length // 5
