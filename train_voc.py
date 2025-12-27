@@ -36,6 +36,28 @@ def main_worker(gpu, ngpus_per_node, config):
     if config['multiprocessing_distributed']:
         config.config['rank'] = config['rank'] * ngpus_per_node + gpu
 
+    def _get_prev_step_checkpoint(prev_dir, trainer_cfg, use_test_best):
+        """
+        优先使用测试集最优权重，其次使用默认的最后 epoch 权重。
+        """
+        if use_test_best:
+            best_path = None
+            best_miou = -float('inf')
+            for ckpt in prev_dir.glob("test_best-epoch*-miou*.pth"):
+                stem = ckpt.stem
+                try:
+                    miou_str = stem.split("miou")[-1]
+                    miou_val = float(miou_str)
+                except Exception:
+                    continue
+                if miou_val > best_miou:
+                    best_miou = miou_val
+                    best_path = ckpt
+            if best_path is not None:
+                return best_path
+
+        return prev_dir / f"checkpoint-epoch{trainer_cfg['epochs']}.pth"
+
     dist.init_process_group(
         backend=config['dist_backend'], init_method=config['dist_url'],
         world_size=config['world_size'], rank=config['rank']
@@ -107,7 +129,8 @@ def main_worker(gpu, ngpus_per_node, config):
 
     # Load previous step weights
     if task_step > 0:
-        old_path = config.save_dir.parent / f"step_{task_step - 1}" / f"checkpoint-epoch{config['trainer']['epochs']}.pth"
+        prev_dir = config.save_dir.parent / f"step_{task_step - 1}"
+        old_path = _get_prev_step_checkpoint(prev_dir, config['trainer'], config['validate'])
         model._load_pretrained_model(f'{old_path}')
         logger.info(f"Load weights from a previous step:{old_path}")
 
