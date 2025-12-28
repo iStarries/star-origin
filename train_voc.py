@@ -36,14 +36,15 @@ def main_worker(gpu, ngpus_per_node, config):
     if config['multiprocessing_distributed']:
         config.config['rank'] = config['rank'] * ngpus_per_node + gpu
 
-    def _get_prev_step_checkpoint(prev_dir, trainer_cfg, use_test_best):
+    def _get_prev_step_checkpoint(prev_dir, trainer_cfg, best_source):
         """
-        优先使用测试集最优权重，其次使用默认的最后 epoch 权重。
+        优先使用指定来源(test/val)的最优权重，其次使用默认的最后 epoch 权重。
         """
-        if use_test_best:
+        if best_source:
             best_path = None
             best_miou = -float('inf')
-            for ckpt in prev_dir.glob("test_best-epoch*-miou*.pth"):
+            pattern = f"{best_source}_best-epoch*-miou*.pth"
+            for ckpt in prev_dir.glob(pattern):
                 stem = ckpt.stem
                 try:
                     miou_str = stem.split("miou")[-1]
@@ -82,7 +83,7 @@ def main_worker(gpu, ngpus_per_node, config):
     task_setting = config['data_loader']['args']['task']['setting']
 
     # Create Dataloader
-    dataset = config.init_obj('data_loader', module_data)
+    dataset = config.init_obj('data_loader', module_data, concat_all_val=config.get('validate_a', False))
 
     # Create old Model
     if task_step > 0:
@@ -130,7 +131,8 @@ def main_worker(gpu, ngpus_per_node, config):
     # Load previous step weights
     if task_step > 0:
         prev_dir = config.save_dir.parent / f"step_{task_step - 1}"
-        old_path = _get_prev_step_checkpoint(prev_dir, config['trainer'], config['validate'])
+        best_source = 'test' if config['validate'] else ('val' if config.get('validate_a', False) else None)
+        old_path = _get_prev_step_checkpoint(prev_dir, config['trainer'], best_source)
         model._load_pretrained_model(f'{old_path}')
         logger.info(f"Load weights from a previous step:{old_path}")
 

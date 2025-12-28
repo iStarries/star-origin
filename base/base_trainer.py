@@ -437,17 +437,36 @@ class BaseTrainer:
             self.val_best_miou = miou
             self.val_best_path = filename
 
-    def _finalize_info_log(self):
+    def _finalize_info_log(self, miou=None, source=None):
         """
         结束训练时记录尾端验证的最优结果，兼容旧字段，避免属性缺失。
+        - 兼容旧签名：若传入 miou/source，仅记录一次并安全格式化（避免 None 或 -inf 报错）
+        - 默认行为：遍历 tail_validation_sources 逐个记录
         """
-        for source in self.tail_validation_sources:
-            best_miou = self.tail_best_miou.get(source, -inf)
-            best_path = self.tail_best_path.get(source)
-            if best_miou != -inf:
-                self.logger.info(f"[tail-{source}] best mIoU: {best_miou:.2f}, path: {best_path}")
+        # 兼容旧调用方式：_finalize_info_log(test_miou, 'test')
+        if miou is not None or source is not None:
+            src = source or "test"
+            best_miou = miou
+            if best_miou is None or best_miou == -inf:
+                suffix = "unknown"
             else:
-                self.logger.info(f"[tail-{source}] no best checkpoint recorded")
+                suffix = f"{best_miou:.2f}"
+            best_path = None
+            if src == "test":
+                best_path = getattr(self, "test_best_path", None)
+            elif src == "val":
+                best_path = getattr(self, "val_best_path", None)
+            self.logger.info(f"[tail-{src}] best mIoU: {suffix}, path: {best_path}")
+            return
+
+        # 新逻辑：遍历 tail 验证来源
+        for src in self.tail_validation_sources:
+            best_miou = self.tail_best_miou.get(src, -inf)
+            best_path = self.tail_best_path.get(src)
+            if best_miou != -inf:
+                self.logger.info(f"[tail-{src}] best mIoU: {best_miou:.2f}, path: {best_path}")
+            else:
+                self.logger.info(f"[tail-{src}] no best checkpoint recorded")
 
     def _finalize_info_log(self, miou_from_test=None):
         if self.rank != 0:

@@ -5,7 +5,7 @@ from data_loader.dataset import VOCSegmentationIncremental, ADESegmentationIncre
 
 
 class VOCIncrementalDataLoader():
-    def __init__(self, task, train, val, test, num_workers, pin_memory, memory=None):
+    def __init__(self, task, train, val, test, num_workers, pin_memory, memory=None, concat_all_val=False):
         self.task = task
         self.train = train
 
@@ -23,20 +23,39 @@ class VOCIncrementalDataLoader():
             **train['args'],
         )
 
+        if concat_all_val and val['cross_val'] is True:
+            raise NotImplementedError("concat_all_val is not supported when cross_val is True.")
+
         if val['cross_val'] is True:
             train_len = int(0.8 * len(self.train_set))
             val_len = len(self.train_set) - train_len   # select 20% of train dataset
             self.train_set, self.val_set = random_split(self.train_set, [train_len, val_len])
         else:
-            # Validatoin using validation set.
-            self.val_set = VOCSegmentationIncremental(
-                val=True,
-                setting=self.setting,
-                classes_idx_new=self.classes_idx_new,
-                classes_idx_old=self.classes_idx_old,
-                idxs_path=Path(task['idxs_path']) / "voc" / f"{task['setting']}_{task['name']}_val_{self.step:02d}.npy",
-                **val['args'],
-            )
+            # Validation using validation set(s)
+            if concat_all_val and self.step > 0:
+                val_sets = []
+                for s in range(self.step + 1):
+                    classes_idx_new_s, classes_idx_old_s = get_task_labels('voc', self.name, s)
+                    val_sets.append(
+                        VOCSegmentationIncremental(
+                            val=True,
+                            setting=self.setting,
+                            classes_idx_new=classes_idx_new_s,
+                            classes_idx_old=classes_idx_old_s,
+                            idxs_path=Path(task['idxs_path']) / "voc" / f"{task['setting']}_{task['name']}_val_{s:02d}.npy",
+                            **val['args'],
+                        )
+                    )
+                self.val_set = ConcatDataset(val_sets)
+            else:
+                self.val_set = VOCSegmentationIncremental(
+                    val=True,
+                    setting=self.setting,
+                    classes_idx_new=self.classes_idx_new,
+                    classes_idx_old=self.classes_idx_old,
+                    idxs_path=Path(task['idxs_path']) / "voc" / f"{task['setting']}_{task['name']}_val_{self.step:02d}.npy",
+                    **val['args'],
+                )
         self.test_set = VOCSegmentationIncremental(
             test=True,
             setting=self.setting,
@@ -120,7 +139,7 @@ class VOCIncrementalDataLoader():
 
 
 class ADEIncrementalDataLoader():
-    def __init__(self, task, train, val, test, num_workers, pin_memory, memory=None):
+    def __init__(self, task, train, val, test, num_workers, pin_memory, memory=None, concat_all_val=False):
         self.task = task
         self.train = train
         
@@ -139,20 +158,38 @@ class ADEIncrementalDataLoader():
             **train['args'],
         )
 
+        if concat_all_val and val['cross_val'] is True:
+            raise NotImplementedError("concat_all_val is not supported when cross_val is True.")
+
         if val['cross_val'] is True:
             train_len = int(0.8 * len(self.train_set))
             val_len = len(self.train_set) - train_len   # select 20% of train dataset
             self.train_set, self.val_set = random_split(self.train_set, [train_len, val_len])
         else:
-            # Validatoin using validation set.
-            self.val_set = ADESegmentationIncremental(
-                val=True,
-                setting=self.setting,
-                classes_idx_new=self.classes_idx_new,
-                classes_idx_old=self.classes_idx_old,
-                idxs_path=Path(task['idxs_path']) / "ade" / f"{task['setting']}_{task['name']}_val_{self.step:02d}.npy",
-                **val['args'],
-            )
+            if concat_all_val and self.step > 0:
+                val_sets = []
+                for s in range(self.step + 1):
+                    classes_idx_new_s, classes_idx_old_s = get_task_labels('ade', self.name, s)
+                    val_sets.append(
+                        ADESegmentationIncremental(
+                            val=True,
+                            setting=self.setting,
+                            classes_idx_new=classes_idx_new_s,
+                            classes_idx_old=classes_idx_old_s,
+                            idxs_path=Path(task['idxs_path']) / "ade" / f"{task['setting']}_{task['name']}_val_{s:02d}.npy",
+                            **val['args'],
+                        )
+                    )
+                self.val_set = ConcatDataset(val_sets)
+            else:
+                self.val_set = ADESegmentationIncremental(
+                    val=True,
+                    setting=self.setting,
+                    classes_idx_new=self.classes_idx_new,
+                    classes_idx_old=self.classes_idx_old,
+                    idxs_path=Path(task['idxs_path']) / "ade" / f"{task['setting']}_{task['name']}_val_{self.step:02d}.npy",
+                    **val['args'],
+                )
         self.test_set = ADESegmentationIncremental(
             test=True,
             setting=self.setting,
