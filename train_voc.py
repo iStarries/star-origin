@@ -172,22 +172,29 @@ def main_worker(gpu, ngpus_per_node, config):
         **{"optimizer": optimizer, "max_iters": config["trainer"]['epochs'] * len(train_loader)}
     )
 
+    base_old_classes, _ = dataset.get_task_labels(step=0)
+    incremental_new_classes = []
+    for i in range(1, task_step + 1):
+        c, _ = dataset.get_task_labels(step=i)
+        incremental_new_classes += c
+
+    if config.get('validate_a', False):
+        evaluator_val_old_classes = list(set(base_old_classes + [0]))
+        evaluator_val_new_classes = incremental_new_classes
+    else:
+        evaluator_val_old_classes = [0]
+        evaluator_val_new_classes = new_classes
+
     evaluator_val = config.init_obj(
         'evaluator',
         module_metric,
-        *[dataset.n_classes + 1, [0], new_classes]
+        *[dataset.n_classes + 1, evaluator_val_old_classes, evaluator_val_new_classes]
     )
-
-    old_classes, _ = dataset.get_task_labels(step=0)
-    new_classes = []
-    for i in range(1, task_step + 1):
-        c, _ = dataset.get_task_labels(step=i)
-        new_classes += c
 
     evaluator_test = config.init_obj(
         'evaluator',
         module_metric,
-        *[dataset.n_classes + 1, list(set(old_classes + [0])), new_classes]
+        *[dataset.n_classes + 1, list(set(base_old_classes + [0])), incremental_new_classes]
     )
 
     if task_step > 0:

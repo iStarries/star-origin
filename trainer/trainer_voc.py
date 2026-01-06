@@ -269,26 +269,27 @@ class Trainer_base(BaseTrainer):
                 self.writer.set_step((epoch), 'valid')
 
             for met in self.metric_ftns_val:
-                if len(met().keys()) > 2:
-                    self.valid_metrics.update(met.__name__, [met()['old'], met()['new'], met()['harmonic']], 'old', 'new', 'harmonic', n=1)
+                metric_result = met()
+                if len(metric_result.keys()) > 2:
+                    self.valid_metrics.update(met.__name__, [metric_result['old'], metric_result['new'], metric_result['harmonic']], 'old', 'new', 'harmonic', n=1)
                 else:
-                    self.valid_metrics.update(met.__name__, [met()['overall']], 'overall', n=1)
+                    self.valid_metrics.update(met.__name__, [metric_result['overall']], 'overall', n=1)
 
-                if 'old' in met().keys():
-                    log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
-                if 'new' in met().keys():
-                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
-                if 'harmonic' in met().keys():
-                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
-                if 'overall' in met().keys():
-                    log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
-                if 'by_class' in met().keys():
+                if 'old' in metric_result:
+                    log.update({met.__name__ + '_old': float(metric_result['old'])})
+                if 'new' in metric_result:
+                    log.update({met.__name__ + '_new': float(metric_result['new'])})
+                if 'harmonic' in metric_result:
+                    log.update({met.__name__ + '_harmonic': float(metric_result['harmonic'])})
+                if 'overall' in metric_result:
+                    log.update({met.__name__ + '_overall': float(metric_result['overall'])})
+                if 'by_class' in metric_result:
                     by_class_str = '\n'
-                    for i in range(len(met()['by_class'])):
+                    for i in range(len(metric_result['by_class'])):
                         if i in self.evaluator_val.new_classes_idx:
-                            by_class_str = by_class_str + f"{i:2d} *{VOC[i]} {met()['by_class'][i]:.2f}\n"
+                            by_class_str = by_class_str + f"{i:2d} *{VOC[i]} {metric_result['by_class'][i]:.2f}\n"
                         elif i in self.evaluator_val.old_classes_idx:
-                            by_class_str = by_class_str + f"{i:2d}  {VOC[i]} {met()['by_class'][i]:.2f}\n"
+                            by_class_str = by_class_str + f"{i:2d}  {VOC[i]} {metric_result['by_class'][i]:.2f}\n"
                     log.update({met.__name__ + '_by_class': by_class_str})
         return log
 
@@ -324,27 +325,28 @@ class Trainer_base(BaseTrainer):
                     self.writer.set_step((epoch), 'test')
 
             for met in self.metric_ftns_test:
+                metric_result = met()
                 if epoch is not None:
-                    if len(met().keys()) > 2:
-                        self.test_metrics.update(met.__name__, [met()['old'], met()['new'], met()['harmonic']], 'old', 'new', 'harmonic', n=1)
+                    if len(metric_result.keys()) > 2:
+                        self.test_metrics.update(met.__name__, [metric_result['old'], metric_result['new'], metric_result['harmonic']], 'old', 'new', 'harmonic', n=1)
                     else:
-                        self.test_metrics.update(met.__name__, [met()['overall']], 'overall', n=1)
+                        self.test_metrics.update(met.__name__, [metric_result['overall']], 'overall', n=1)
 
-                if 'old' in met().keys():
-                    log.update({met.__name__ + '_old': f"{met()['old']:.2f}"})
-                if 'new' in met().keys():
-                    log.update({met.__name__ + '_new': f"{met()['new']:.2f}"})
-                if 'harmonic' in met().keys():
-                    log.update({met.__name__ + '_harmonic': f"{met()['harmonic']:.2f}"})
-                if 'overall' in met().keys():
-                    log.update({met.__name__ + '_overall': f"{met()['overall']:.2f}"})
-                if 'by_class' in met().keys():
+                if 'old' in metric_result:
+                    log.update({met.__name__ + '_old': float(metric_result['old'])})
+                if 'new' in metric_result:
+                    log.update({met.__name__ + '_new': float(metric_result['new'])})
+                if 'harmonic' in metric_result:
+                    log.update({met.__name__ + '_harmonic': float(metric_result['harmonic'])})
+                if 'overall' in metric_result:
+                    log.update({met.__name__ + '_overall': float(metric_result['overall'])})
+                if 'by_class' in metric_result:
                     by_class_str = '\n'
-                    for i in range(len(met()['by_class'])):
+                    for i in range(len(metric_result['by_class'])):
                         if i in self.evaluator_test.new_classes_idx:
-                            by_class_str = by_class_str + f"{i:2d} *{VOC[i]} {met()['by_class'][i]:.2f}\n"
+                            by_class_str = by_class_str + f"{i:2d} *{VOC[i]} {metric_result['by_class'][i]:.2f}\n"
                         else:
-                            by_class_str = by_class_str + f"{i:2d}  {VOC[i]} {met()['by_class'][i]:.2f}\n"
+                            by_class_str = by_class_str + f"{i:2d}  {VOC[i]} {metric_result['by_class'][i]:.2f}\n"
                     log.update({met.__name__ + '_by_class': by_class_str})
         return log
 
