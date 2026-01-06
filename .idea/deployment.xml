@@ -7,14 +7,14 @@
       <paths name="21">
         <serverdata>
           <mappings>
-            <mapping deploy="/" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/wyh/star" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
       <paths name="23">
         <serverdata>
           <mappings>
-            <mapping deploy="/" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/star" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

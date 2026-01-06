@@ -271,6 +271,7 @@ if __name__ == '__main__':
         CustomArgs(['--phase_k_old'], type=int, target='phase_replay;k_old'),
         CustomArgs(['--phase_r_low'], type=float, target='phase_replay;r_low_ratio'),
         CustomArgs(['--phase_r_high'], type=float, target='phase_replay;r_high_ratio'),
+        CustomArgs(['--phase_n_bins'], type=int, target='phase_replay;n_bins'),
         CustomArgs(['--phase_beta'], type=float, target='phase_replay;ema_beta'),
         CustomArgs(['--phase_use_cos_sin'], action='store_true', target='phase_replay;use_cos_sin'),
         CustomArgs(['--phase_no_cos_sin'], action='store_false', target='phase_replay;use_cos_sin'),

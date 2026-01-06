@@ -183,10 +183,14 @@ class BaseTrainer:
         self.ppb = PhasePrototypeBank(
             num_classes=desired_num,
             feat_shape=feat_shape,
+            n_bins=self.phase_replay_cfg.get('n_bins', 8),
             r_low_ratio=self.phase_replay_cfg.get('r_low_ratio', 0.2),
             r_high_ratio=self.phase_replay_cfg.get('r_high_ratio', 0.6),
             ema_beta=self.phase_replay_cfg.get('ema_beta', 0.01),
             use_cos_sin=self.phase_replay_cfg.get('use_cos_sin', True),
+            use_amp_stats=self.phase_replay_cfg.get('use_amp_stats', False),
+            phase_noise_scale=self.phase_replay_cfg.get('phase_noise_scale', 0.0),
+            amp_noise_scale=self.phase_replay_cfg.get('amp_noise_scale', 0.0),
             normalize_syn=self.phase_replay_cfg.get('normalize_syn', False),
             replay_detach_ref=self.phase_replay_cfg.get('replay_detach_ref', True),
         )
@@ -244,19 +248,36 @@ class BaseTrainer:
         self.ppb = PhasePrototypeBank(
             num_classes=cur_num,
             feat_shape=feat_shape,
+            n_bins=meta.get("n_bins", self.phase_replay_cfg.get('n_bins', 8)),
             r_low_ratio=meta.get("r_low_ratio", self.phase_replay_cfg.get('r_low_ratio', 0.2)),
             r_high_ratio=meta.get("r_high_ratio", self.phase_replay_cfg.get('r_high_ratio', 0.6)),
             ema_beta=meta.get("ema_beta", self.phase_replay_cfg.get('ema_beta', 0.01)),
             use_cos_sin=meta.get("use_cos_sin", self.phase_replay_cfg.get('use_cos_sin', True)),
+            use_amp_stats=meta.get("use_amp_stats", self.phase_replay_cfg.get('use_amp_stats', False)),
+            phase_noise_scale=meta.get("phase_noise_scale", self.phase_replay_cfg.get('phase_noise_scale', 0.0)),
+            amp_noise_scale=meta.get("amp_noise_scale", self.phase_replay_cfg.get('amp_noise_scale', 0.0)),
             normalize_syn=self.phase_replay_cfg.get('normalize_syn', False),
             replay_detach_ref=self.phase_replay_cfg.get('replay_detach_ref', True),
         )
 
         state = payload.get("state_dict", {})
-        required = ["mid_mask", "phase_cos", "phase_sin", "amp_mean", "count"]
+        required = [
+            "mid_mask",
+            "ring_masks",
+            "phase_cos_bin",
+            "phase_sin_bin",
+            "logamp_mean_bin",
+            "logamp_var_bin",
+            "count",
+        ]
         missing = [k for k in required if k not in state]
         if missing:
-            raise RuntimeError(f"[PHASE-PPB] Missing keys in state_dict: {missing}. File: {ppb_path}")
+            self.logger.warning(
+                f"[PHASE-PPB] Missing keys in state_dict (possibly old checkpoint): {missing}. "
+                f"Reinitializing empty PPB for step {step}."
+            )
+            self.ppb.to(self.device)
+            return
 
         # 强校验 mid_mask 一致（否则说明 r_low/r_high 或 feat_shape 不一致）
         if not torch.equal(self.ppb.mid_mask.cpu(), state["mid_mask"].cpu()):
@@ -265,9 +286,20 @@ class BaseTrainer:
                 "This usually means feat_shape or (r_low_ratio, r_high_ratio) changed."
             )
 
-        # 强校验 (C, n_mid) 一致，再做拷贝
+        # 强校验 ring_masks 形状一致
+        if self.ppb.ring_masks.shape != state["ring_masks"].shape:
+            raise RuntimeError(
+                f"[PHASE-PPB] ring_masks shape mismatch: "
+                f"loaded={tuple(state['ring_masks'].shape)} current={tuple(self.ppb.ring_masks.shape)}. "
+                "This usually means n_bins or feat_shape changed."
+            )
+        # 直接复用 checkpoint 的 ring_masks，保证回放划分与统计一致
         with torch.no_grad():
-            for key in ["phase_cos", "phase_sin", "amp_mean"]:
+            self.ppb.ring_masks.copy_(state["ring_masks"])
+
+        # 强校验 (C, n_bins) 一致，再做拷贝
+        with torch.no_grad():
+            for key in ["phase_cos_bin", "phase_sin_bin", "logamp_mean_bin", "logamp_var_bin"]:
                 src = state[key]
                 dst = getattr(self.ppb, key)
                 if src.shape[0] != prev_num:
@@ -301,6 +333,10 @@ class BaseTrainer:
                 "r_high_ratio": self.phase_replay_cfg.get('r_high_ratio', 0.6),
                 "use_cos_sin": self.phase_replay_cfg.get('use_cos_sin', True),
                 "ema_beta": self.phase_replay_cfg.get('ema_beta', 0.01),
+                "n_bins": self.phase_replay_cfg.get('n_bins', 8),
+                "use_amp_stats": self.phase_replay_cfg.get('use_amp_stats', False),
+                "phase_noise_scale": self.phase_replay_cfg.get('phase_noise_scale', 0.0),
+                "amp_noise_scale": self.phase_replay_cfg.get('amp_noise_scale', 0.0),
                 "ref_mode": self.phase_replay_cfg.get('ref_mode', 'batch_mean'),
             },
             "state_dict": self.ppb.state_dict(),
