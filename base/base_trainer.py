@@ -139,6 +139,56 @@ class BaseTrainer:
             return self.model.module.forward_class_prediction(feature_tensor)
         return self.model.forward_class_prediction(feature_tensor)
 
+    def _build_phase_ppb_kwargs(self, feat_shape, num_classes, meta=None):
+        meta = meta or {}
+        cfg = self.phase_replay_cfg
+        return {
+            "num_classes": num_classes,
+            "feat_shape": feat_shape,
+            "n_bins": meta.get("n_bins", cfg.get('n_bins', 8)),
+            "r_low_ratio": meta.get("r_low_ratio", cfg.get('r_low_ratio', 0.2)),
+            "r_high_ratio": meta.get("r_high_ratio", cfg.get('r_high_ratio', 0.6)),
+            "ema_beta": meta.get("ema_beta", cfg.get('ema_beta', 0.01)),
+            "use_cos_sin": meta.get("use_cos_sin", cfg.get('use_cos_sin', True)),
+            "use_amp_stats": meta.get("use_amp_stats", cfg.get('use_amp_stats', True)),
+            "phase_noise_scale": meta.get("phase_noise_scale", cfg.get('phase_noise_scale', 0.0)),
+            "amp_noise_scale": meta.get("amp_noise_scale", cfg.get('amp_noise_scale', 0.0)),
+            "normalize_syn": meta.get("normalize_syn", cfg.get('normalize_syn', False)),
+            "replay_detach_ref": meta.get("replay_detach_ref", cfg.get('replay_detach_ref', True)),
+            "phase_model": meta.get("phase_model", cfg.get('phase_model', "gmm")),
+            "phase_gmm_components": meta.get("phase_gmm_components", cfg.get('phase_gmm_components', 3)),
+            "phase_gmm_diag": meta.get("phase_gmm_diag", cfg.get('phase_gmm_diag', True)),
+            "phase_gmm_min_var": meta.get("phase_gmm_min_var", cfg.get('phase_gmm_min_var', 1e-4)),
+            "phase_residual_scale": meta.get("phase_residual_scale", cfg.get('phase_residual_scale', 0.5)),
+            "phase_sample_mode": meta.get("phase_sample_mode", cfg.get('phase_sample_mode', "mixture")),
+            "phase_update_mode": meta.get("phase_update_mode", cfg.get('phase_update_mode', "ema_em")),
+            "phase_use_delta": meta.get("phase_use_delta", cfg.get('phase_use_delta', True)),
+        }
+
+    def _validate_phase_ppb_layout(self, state):
+        if not torch.equal(self.ppb.mid_mask.cpu(), state["mid_mask"].cpu()):
+            raise RuntimeError(
+                "[PHASE-PPB] mid_mask mismatch between loaded PPB and current PPB init. "
+                "This usually means feat_shape or (r_low_ratio, r_high_ratio) changed."
+            )
+        if self.ppb.ring_masks.shape != state["ring_masks"].shape:
+            raise RuntimeError(
+                f"[PHASE-PPB] ring_masks shape mismatch: "
+                f"loaded={tuple(state['ring_masks'].shape)} current={tuple(self.ppb.ring_masks.shape)}. "
+                "This usually means n_bins or feat_shape changed."
+            )
+        if self.ppb.ring_edges.shape != state["ring_edges"].shape:
+            raise RuntimeError(
+                f"[PHASE-PPB] ring_edges shape mismatch: "
+                f"loaded={tuple(state['ring_edges'].shape)} current={tuple(self.ppb.ring_edges.shape)}."
+            )
+        for key in ["logamp_mean_bin", "logamp_var_bin"]:
+            if getattr(self.ppb, key).shape[1:] != state[key].shape[1:]:
+                raise RuntimeError(
+                    f"[PHASE-PPB] {key} shape mismatch: "
+                    f"loaded={tuple(state[key].shape)} current={tuple(getattr(self.ppb, key).shape)}."
+                )
+
     def _maybe_init_ppb(self, logit, features):
         """
         1) phase_replay 未启用：不做任何事
@@ -180,20 +230,7 @@ class BaseTrainer:
                 f"Check label remap / head expand logic."
             )
 
-        self.ppb = PhasePrototypeBank(
-            num_classes=desired_num,
-            feat_shape=feat_shape,
-            n_bins=self.phase_replay_cfg.get('n_bins', 8),
-            r_low_ratio=self.phase_replay_cfg.get('r_low_ratio', 0.2),
-            r_high_ratio=self.phase_replay_cfg.get('r_high_ratio', 0.6),
-            ema_beta=self.phase_replay_cfg.get('ema_beta', 0.01),
-            use_cos_sin=self.phase_replay_cfg.get('use_cos_sin', True),
-            use_amp_stats=self.phase_replay_cfg.get('use_amp_stats', False),
-            phase_noise_scale=self.phase_replay_cfg.get('phase_noise_scale', 0.0),
-            amp_noise_scale=self.phase_replay_cfg.get('amp_noise_scale', 0.0),
-            normalize_syn=self.phase_replay_cfg.get('normalize_syn', False),
-            replay_detach_ref=self.phase_replay_cfg.get('replay_detach_ref', True),
-        )
+        self.ppb = PhasePrototypeBank(**self._build_phase_ppb_kwargs(feat_shape=feat_shape, num_classes=desired_num))
         self.ppb.to(self.device)
 
     def _load_phase_ppb(self, config):
@@ -246,38 +283,68 @@ class BaseTrainer:
 
         # 用当前 step 的 cur_num 构建新 PPB（扩容）
         self.ppb = PhasePrototypeBank(
-            num_classes=cur_num,
-            feat_shape=feat_shape,
-            n_bins=meta.get("n_bins", self.phase_replay_cfg.get('n_bins', 8)),
-            r_low_ratio=meta.get("r_low_ratio", self.phase_replay_cfg.get('r_low_ratio', 0.2)),
-            r_high_ratio=meta.get("r_high_ratio", self.phase_replay_cfg.get('r_high_ratio', 0.6)),
-            ema_beta=meta.get("ema_beta", self.phase_replay_cfg.get('ema_beta', 0.01)),
-            use_cos_sin=meta.get("use_cos_sin", self.phase_replay_cfg.get('use_cos_sin', True)),
-            use_amp_stats=meta.get("use_amp_stats", self.phase_replay_cfg.get('use_amp_stats', False)),
-            phase_noise_scale=meta.get("phase_noise_scale", self.phase_replay_cfg.get('phase_noise_scale', 0.0)),
-            amp_noise_scale=meta.get("amp_noise_scale", self.phase_replay_cfg.get('amp_noise_scale', 0.0)),
-            normalize_syn=self.phase_replay_cfg.get('normalize_syn', False),
-            replay_detach_ref=self.phase_replay_cfg.get('replay_detach_ref', True),
+            **self._build_phase_ppb_kwargs(feat_shape=feat_shape, num_classes=cur_num, meta=meta)
         )
 
         state = payload.get("state_dict", {})
-        required = [
-            "mid_mask",
-            "ring_masks",
-            "phase_cos_bin",
-            "phase_sin_bin",
-            "logamp_mean_bin",
-            "logamp_var_bin",
-            "count",
-        ]
+        required = ["mid_mask", "ring_masks", "ring_edges", "logamp_mean_bin", "logamp_var_bin", "count"]
         missing = [k for k in required if k not in state]
+        has_new_phase_keys = all(
+            key in state for key in ["phase_gmm_weight", "phase_gmm_mean", "phase_gmm_var", "phase_gmm_count"]
+        )
+        has_old_phase_keys = all(key in state for key in ["phase_cos_bin", "phase_sin_bin"])
         if missing:
             self.logger.warning(
-                f"[PHASE-PPB] Missing keys in state_dict (possibly old checkpoint): {missing}. "
+                f"[PHASE-PPB] Missing keys in state_dict: {missing}. "
                 f"Reinitializing empty PPB for step {step}."
             )
             self.ppb.to(self.device)
             return
+
+        self._validate_phase_ppb_layout(state)
+        with torch.no_grad():
+            self.ppb.mid_mask.copy_(state["mid_mask"])
+            self.ppb.ring_masks.copy_(state["ring_masks"])
+            self.ppb.ring_edges.copy_(state["ring_edges"])
+
+            for key in ["logamp_mean_bin", "logamp_var_bin"]:
+                src = state[key]
+                dst = getattr(self.ppb, key)
+                if src.shape[0] != prev_num or src.shape[1:] != dst.shape[1:]:
+                    raise RuntimeError(
+                        f"[PHASE-PPB] {key} shape mismatch: "
+                        f"loaded={tuple(src.shape)} current={tuple(dst.shape)} prev_num={prev_num}."
+                    )
+                dst[:prev_num].copy_(src)
+
+            src_count = state["count"]
+            if src_count.shape[0] != prev_num:
+                raise RuntimeError(f"[PHASE-PPB] count prev_num mismatch: {src_count.shape[0]} != {prev_num}")
+            self.ppb.count[:prev_num].copy_(src_count)
+
+            if has_new_phase_keys:
+                for key in ["phase_gmm_weight", "phase_gmm_mean", "phase_gmm_var", "phase_gmm_count"]:
+                    src = state[key]
+                    dst = getattr(self.ppb, key)
+                    if src.shape[0] != prev_num or src.shape[1:] != dst.shape[1:]:
+                        raise RuntimeError(
+                            f"[PHASE-PPB] {key} shape mismatch: "
+                            f"loaded={tuple(src.shape)} current={tuple(dst.shape)} prev_num={prev_num}."
+                        )
+                    dst[:prev_num].copy_(src)
+            elif payload.get("version", 1) < 2 or has_old_phase_keys:
+                self.logger.warning(
+                    "[PHASE-PPB] Loaded legacy PPB without phase GMM stats. "
+                    "Falling back to amplitude-only replay until new GMM stats are accumulated."
+                )
+            else:
+                self.logger.warning(
+                    "[PHASE-PPB] Loaded PPB has no usable phase statistics. "
+                    "Only amplitude replay will be available for previously seen classes."
+                )
+
+        self.ppb.to(self.device)
+        return
 
         # 强校验 mid_mask 一致（否则说明 r_low/r_high 或 feat_shape 不一致）
         if not torch.equal(self.ppb.mid_mask.cpu(), state["mid_mask"].cpu()):
@@ -325,7 +392,7 @@ class BaseTrainer:
         if isinstance(cfg_dict, dict):
             ppb_filename = cfg_dict.get('phase_replay', {}).get('ppb_filename', ppb_filename)
         payload = {
-            "version": 1,
+            "version": 2,
             "meta": {
                 "num_classes": self.ppb.num_classes,
                 "feat_shape": self.ppb.feat_shape,
@@ -334,10 +401,20 @@ class BaseTrainer:
                 "use_cos_sin": self.phase_replay_cfg.get('use_cos_sin', True),
                 "ema_beta": self.phase_replay_cfg.get('ema_beta', 0.01),
                 "n_bins": self.phase_replay_cfg.get('n_bins', 8),
-                "use_amp_stats": self.phase_replay_cfg.get('use_amp_stats', False),
+                "use_amp_stats": self.phase_replay_cfg.get('use_amp_stats', True),
                 "phase_noise_scale": self.phase_replay_cfg.get('phase_noise_scale', 0.0),
                 "amp_noise_scale": self.phase_replay_cfg.get('amp_noise_scale', 0.0),
                 "ref_mode": self.phase_replay_cfg.get('ref_mode', 'batch_mean'),
+                "normalize_syn": self.phase_replay_cfg.get('normalize_syn', False),
+                "replay_detach_ref": self.phase_replay_cfg.get('replay_detach_ref', True),
+                "phase_model": self.phase_replay_cfg.get('phase_model', "gmm"),
+                "phase_gmm_components": self.phase_replay_cfg.get('phase_gmm_components', 3),
+                "phase_gmm_diag": self.phase_replay_cfg.get('phase_gmm_diag', True),
+                "phase_gmm_min_var": self.phase_replay_cfg.get('phase_gmm_min_var', 1e-4),
+                "phase_residual_scale": self.phase_replay_cfg.get('phase_residual_scale', 0.5),
+                "phase_sample_mode": self.phase_replay_cfg.get('phase_sample_mode', "mixture"),
+                "phase_update_mode": self.phase_replay_cfg.get('phase_update_mode', "ema_em"),
+                "phase_use_delta": self.phase_replay_cfg.get('phase_use_delta', True),
             },
             "state_dict": self.ppb.state_dict(),
         }

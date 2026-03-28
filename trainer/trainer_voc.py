@@ -597,6 +597,7 @@ class Trainer_incremental(Trainer_base):
 
                     replay_losses = []
                     for class_id in sampled_old:
+                        # PPB encapsulates both the new phase-GMM replay path and the legacy amp-only fallback.
                         x_syn = self.ppb.synthesize_from_reference(feature_ref, class_id)
                         if x_syn is None:
                             continue
@@ -615,11 +616,20 @@ class Trainer_incremental(Trainer_base):
                     if replay_losses:
                         loss_replay = torch.stack(replay_losses).mean()
                         lam = self.phase_replay_cfg.get('lambda_replay', 0.1)
+                        warmup_epochs = self.phase_replay_cfg.get('warmup_epochs', 0)
+                        if warmup_epochs > 0:
+                            lam_eff = lam * min(1.0, float(epoch) / float(max(1, warmup_epochs)))
+                        else:
+                            lam_eff = lam
                         loss_phase_raw = loss_replay
-                        loss_phase = lam * loss_replay
+                        loss_phase = lam_eff * loss_replay
                         loss = loss + loss_phase
                         if batch_idx % 50 == 0 and self.rank == 0:
-                            self.logger.info(f"[PHASE] loss_replay={loss_replay.item():.4f} lam={lam} lam*replay={(lam * loss_replay).item():.4f}")
+                            self.logger.info(
+                                f"[PHASE] loss_replay={loss_replay.item():.4f} "
+                                f"lam={lam} lam_eff={lam_eff} "
+                                f"lam_eff*replay={(lam_eff * loss_replay).item():.4f}"
+                            )
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
